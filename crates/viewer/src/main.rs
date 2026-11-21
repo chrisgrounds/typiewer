@@ -53,14 +53,17 @@ fn walk_tree(node: Node, source: &str, depth: usize) {
   }
 }
 
-fn collect_source_files(root: &PathBuf, ignore: &Vec<String>) -> Vec<String> {
+fn collect_source_files(root: &PathBuf, ignore: Vec<String>) -> Vec<String> {
   let mut res = vec![];
-  let r = fs::read_dir(root).unwrap();
-  for a in r {
-    let dir_entry = a.unwrap();
+  let read_dir_res = fs::read_dir(root).unwrap();
+  for maybe_dir_entry in read_dir_res {
+    let dir_entry = maybe_dir_entry.unwrap();
 
-    // we want to skip these as we don't want to parse them
-    if dir_entry.file_name() == "target" {
+    if dir_entry
+      .file_name()
+      .to_str()
+      .is_some_and(|name| ignore.iter().any(|i| i == name))
+    {
       continue;
     }
 
@@ -77,7 +80,7 @@ fn collect_source_files(root: &PathBuf, ignore: &Vec<String>) -> Vec<String> {
     }
 
     if path.is_dir() {
-      let mut c = collect_source_files(&path, ignore);
+      let mut c = collect_source_files(&path, ignore.clone());
       res.append(c.as_mut())
     }
   }
@@ -95,14 +98,18 @@ fn main() {
     .set_language(&tree_sitter_rust::LANGUAGE.into())
     .expect("Failed to load Rust grammar");
 
-  let root = "../hyperactos/apps/etl-rs";
-  let gitignore = format!("../hyperactos/.gitignore");
+  let root = ".";
+  let gitignore = format!("./.gitignore");
 
-  let gitignored_files = fs::read_to_string(gitignore).unwrap();
-  println!("{}", gitignored_files);
+  let gitignored_files: Vec<String> = fs::read_to_string(gitignore)
+    .unwrap()
+    .lines()
+    .map(str::to_owned)
+    .collect();
+  println!("{:?}", gitignored_files);
 
   let files = performance!(
-    collect_source_files(&PathBuf::from(root), &vec![]),
+    collect_source_files(&PathBuf::from(root), gitignored_files),
     "collect source files"
   );
 
