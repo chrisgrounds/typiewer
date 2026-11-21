@@ -5,6 +5,7 @@ use gpui::{
   rgb, size,
 };
 use gpui_platform::application;
+use macros::performance;
 
 use tree_sitter::{Node, Parser};
 
@@ -40,18 +41,6 @@ impl Render for HelloWorld {
           .child(div().size_8().bg(gpui::white())),
       )
   }
-}
-
-macro_rules! performance {
-  ($content:expr, $name:expr) => {{
-    let start = std::time::Instant::now();
-    let res = $content;
-    println!("[{}] Time taken: {:?}", $name, start.elapsed());
-    res
-  }};
-  ($content:expr) => {
-    performance!($content, stringify!($content))
-  };
 }
 
 fn walk_tree(node: Node, source: &str, depth: usize) {

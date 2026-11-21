@@ -2500,6 +2500,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
 
 [[package]]
+name = "macros"
+version = "0.1.0"
+
+[[package]]
 name = "maybe-rayon"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4832,6 +4836,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "macros",
  "tree-sitter",
  "tree-sitter-rust",
 ]
