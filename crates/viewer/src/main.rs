@@ -53,7 +53,7 @@ fn walk_tree(node: Node, source: &str, depth: usize) {
   }
 }
 
-fn collect_source_files(root: &PathBuf) -> Vec<String> {
+fn collect_source_files(root: &PathBuf, ignore: &Vec<String>) -> Vec<String> {
   let mut res = vec![];
   let r = fs::read_dir(root).unwrap();
   for a in r {
@@ -77,7 +77,7 @@ fn collect_source_files(root: &PathBuf) -> Vec<String> {
     }
 
     if path.is_dir() {
-      let mut c = collect_source_files(&path);
+      let mut c = collect_source_files(&path, ignore);
       res.append(c.as_mut())
     }
   }
@@ -96,9 +96,13 @@ fn main() {
     .expect("Failed to load Rust grammar");
 
   let root = "../hyperactos/apps/etl-rs";
+  let gitignore = format!("../hyperactos/.gitignore");
+
+  let gitignored_files = fs::read_to_string(gitignore).unwrap();
+  println!("{}", gitignored_files);
 
   let files = performance!(
-    collect_source_files(&PathBuf::from(root)),
+    collect_source_files(&PathBuf::from(root), &vec![]),
     "collect source files"
   );
 
