@@ -9,11 +9,11 @@ use macros::performance;
 
 use tree_sitter::{Node, Parser};
 
-struct HelloWorld {
+struct Application {
   text: SharedString,
 }
 
-impl Render for HelloWorld {
+impl Render for Application {
   fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
     div()
       .flex()
@@ -43,13 +43,57 @@ impl Render for HelloWorld {
   }
 }
 
-fn walk_tree(node: Node, source: &str, depth: usize) {
-  let indent = "  ".repeat(depth);
-  // println!("{}{}: {:?}", indent, node.kind(), &source[node.byte_range()]);
+#[derive(Debug)]
+pub enum Item {
+  Type {
+    name: String,
+    kind: String,
+  },
+  Function {
+    name: String,
+    params: String,
+    return_type: Option<String>,
+  },
+}
+
+fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
+  &source[node.byte_range()]
+}
+
+fn walk_tree(node: Node, source: &str, acc: &mut Vec<Item>) {
+  match node.kind() {
+    "struct_item" | "enum_item" | "trait_item" | "type_item" => {
+      if let Some(name) = node.child_by_field_name("name") {
+        acc.push(Item::Type {
+          kind: node.kind().trim_end_matches("_item").to_string(),
+          name: node_text(name, source).to_string(),
+        });
+      }
+    }
+    "function_item" => {
+      if let Some(name) = node.child_by_field_name("name") {
+        let params = node
+          .child_by_field_name("parameters")
+          .map(|n| node_text(n, source).to_string())
+          .unwrap_or_default();
+
+        let return_type = node
+          .child_by_field_name("return_type")
+          .map(|n| node_text(n, source).to_string());
+
+        acc.push(Item::Function {
+          name: node_text(name, source).to_string(),
+          params,
+          return_type,
+        });
+      }
+    }
+    _ => {}
+  };
 
   let mut cursor = node.walk();
   for child in node.children(&mut cursor) {
-    walk_tree(child, source, depth + 1);
+    walk_tree(child, source, acc);
   }
 }
 
@@ -106,14 +150,11 @@ fn main() {
     .lines()
     .map(str::to_owned)
     .collect();
-  println!("{:?}", gitignored_files);
 
   let files = performance!(
     collect_source_files(&PathBuf::from(root), gitignored_files),
     "collect source files"
   );
-
-  println!("{:?}", files);
 
   let trees: Vec<_> = performance!(
     files
@@ -123,13 +164,16 @@ fn main() {
     "tree-sitter: parse files into ASTs"
   );
 
-  let _res: Vec<_> = performance!(
-    trees
-      .into_iter()
-      .map(|(tree, source)| walk_tree(tree.root_node(), &source, 0))
-      .collect(),
+  let mut items = Vec::new();
+
+  performance!(
+    for (tree, source) in &trees {
+      walk_tree(tree.root_node(), source, &mut items);
+    },
     "tree-sitter: walk_tree"
   );
+
+  println!("{:?}", items);
 
   application().run(|cx: &mut App| {
     let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
@@ -139,12 +183,14 @@ fn main() {
         ..Default::default()
       },
       |_, cx| {
-        cx.new(|_| HelloWorld {
+        cx.new(|_| Application {
           text: "World".into(),
         })
       },
     ) {
       eprintln!("Failed to open window: {err}");
     }
+
+    cx.activate(true);
   });
 }
