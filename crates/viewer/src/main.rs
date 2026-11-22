@@ -11,6 +11,7 @@ use tree_sitter::{Node, Parser};
 
 struct Application {
   text: SharedString,
+  items: VecItems,
 }
 
 impl Render for Application {
@@ -21,27 +22,26 @@ impl Render for Application {
       .gap_3()
       .bg(rgb(0x505050))
       .size(px(500.0))
-      .justify_center()
-      .items_center()
-      .shadow_lg()
-      .border_1()
-      .border_color(rgb(0x0000ff))
-      .text_xl()
       .text_color(rgb(0xffffff))
       .child(format!("Hello, {}!", self.text))
-      .child(
-        div()
-          .flex()
-          .gap_2()
-          .child(div().size_8().bg(gpui::red()))
-          .child(div().size_8().bg(gpui::green()))
-          .child(div().size_8().bg(gpui::blue()))
-          .child(div().size_8().bg(gpui::yellow()))
-          .child(div().size_8().bg(gpui::black()))
-          .child(div().size_8().bg(gpui::white())),
-      )
+      .children(self.items.iter().map(|item| {
+        let label = match item {
+          Item::Type { name, kind } => format!("{kind} {name}"),
+          Item::Function {
+            name,
+            params,
+            return_type,
+          } => match return_type {
+            Some(ret) => format!("fn {name}{params} -> {ret}"),
+            None => format!("fn {name}{params}"),
+          },
+        };
+        div().child(label)
+      }))
   }
 }
+
+type VecItems = Vec<Item>;
 
 #[derive(Debug)]
 pub enum Item {
@@ -60,7 +60,7 @@ fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
   &source[node.byte_range()]
 }
 
-fn walk_tree(node: Node, source: &str, acc: &mut Vec<Item>) {
+fn walk_tree(node: Node, source: &str, acc: &mut VecItems) {
   match node.kind() {
     "struct_item" | "enum_item" | "trait_item" | "type_item" => {
       if let Some(name) = node.child_by_field_name("name") {
@@ -132,11 +132,6 @@ fn collect_source_files(root: &PathBuf, ignore: Vec<String>) -> Vec<String> {
 }
 
 fn main() {
-  // load all of the files from the workspace
-  // use tree-sitter for working out what types and functions exist
-  // build up directed graph
-  // render
-
   let mut parser = Parser::new();
   parser
     .set_language(&tree_sitter_rust::LANGUAGE.into())
@@ -176,6 +171,13 @@ fn main() {
   println!("{:?}", items);
 
   application().run(|cx: &mut App| {
+    cx.on_window_closed(|cx, _window_id| {
+      if cx.windows().is_empty() {
+        cx.quit();
+      }
+    })
+    .detach();
+
     let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
     if let Err(err) = cx.open_window(
       WindowOptions {
@@ -185,6 +187,7 @@ fn main() {
       |_, cx| {
         cx.new(|_| Application {
           text: "World".into(),
+          items,
         })
       },
     ) {
