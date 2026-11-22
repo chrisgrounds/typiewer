@@ -140,11 +140,14 @@ fn main() {
   let root = ".";
   let gitignore = format!("./.gitignore");
 
-  let gitignored_files: Vec<String> = fs::read_to_string(gitignore)
-    .unwrap()
-    .lines()
-    .map(str::to_owned)
-    .collect();
+  let gitignored_files: Vec<String> = performance!(
+    fs::read_to_string(gitignore)
+      .unwrap()
+      .lines()
+      .map(str::to_owned)
+      .collect(),
+    "parse gitignore"
+  );
 
   let files = performance!(
     collect_source_files(&PathBuf::from(root), gitignored_files),
