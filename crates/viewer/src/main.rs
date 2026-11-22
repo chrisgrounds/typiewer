@@ -1,72 +1,63 @@
+mod application;
+
 use std::{fs, path::PathBuf};
 
-use gpui::{
-  App, Bounds, Context, SharedString, Window, WindowBounds, WindowOptions, div, prelude::*, px,
-  rgb, size,
-};
-use gpui_platform::application;
 use macros::performance;
-
 use tree_sitter::{Node, Parser};
 
-struct Application {
-  text: SharedString,
-  items: VecItems,
-}
-
-impl Render for Application {
-  fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-    div()
-      .flex()
-      .flex_col()
-      .gap_3()
-      .bg(rgb(0x505050))
-      .size(px(500.0))
-      .text_color(rgb(0xffffff))
-      .child(format!("Hello, {}!", self.text))
-      .children(self.items.iter().map(|item| {
-        let label = match item {
-          Item::Type { name, kind } => format!("{kind} {name}"),
-          Item::Function {
-            name,
-            params,
-            return_type,
-          } => match return_type {
-            Some(ret) => format!("fn {name}{params} -> {ret}"),
-            None => format!("fn {name}{params}"),
-          },
-        };
-        div().child(label)
-      }))
-  }
-}
-
-type VecItems = Vec<Item>;
+pub type VecItems = Vec<Item>;
 
 #[derive(Debug)]
 pub enum Item {
   Type {
     name: String,
     kind: String,
+    source: String,
   },
   Function {
     name: String,
     params: String,
     return_type: Option<String>,
+    filename: String,
   },
+}
+
+impl Item {
+  pub fn filename(&self) -> &str {
+    match self {
+      Item::Type { source, .. } => source,
+      Item::Function { filename, .. } => filename,
+    }
+  }
+
+  pub fn label(&self) -> String {
+    match self {
+      Item::Type { name, kind, .. } => format!("{kind} {name}"),
+      Item::Function {
+        name,
+        params,
+        return_type,
+        ..
+      } => match return_type {
+        Some(ret) => format!("fn {name}{params} -> {ret}"),
+        None => format!("fn {name}{params}"),
+      },
+    }
+  }
 }
 
 fn node_text<'a>(node: Node, source: &'a str) -> &'a str {
   &source[node.byte_range()]
 }
 
-fn walk_tree(node: Node, source: &str, acc: &mut VecItems) {
+fn walk_tree(node: Node, source: &str, filename: &str, acc: &mut VecItems) {
   match node.kind() {
     "struct_item" | "enum_item" | "trait_item" | "type_item" => {
       if let Some(name) = node.child_by_field_name("name") {
         acc.push(Item::Type {
           kind: node.kind().trim_end_matches("_item").to_string(),
           name: node_text(name, source).to_string(),
+          source: filename.to_string(),
         });
       }
     }
@@ -85,6 +76,7 @@ fn walk_tree(node: Node, source: &str, acc: &mut VecItems) {
           name: node_text(name, source).to_string(),
           params,
           return_type,
+          filename: filename.to_string(),
         });
       }
     }
@@ -93,11 +85,11 @@ fn walk_tree(node: Node, source: &str, acc: &mut VecItems) {
 
   let mut cursor = node.walk();
   for child in node.children(&mut cursor) {
-    walk_tree(child, source, acc);
+    walk_tree(child, source, filename, acc);
   }
 }
 
-fn collect_source_files(root: &PathBuf, ignore: Vec<String>) -> Vec<String> {
+fn collect_source_files(root: &PathBuf, ignore: Vec<String>) -> Vec<(String, String)> {
   let mut res = vec![];
   let read_dir_res = fs::read_dir(root).unwrap();
   for maybe_dir_entry in read_dir_res {
@@ -115,7 +107,7 @@ fn collect_source_files(root: &PathBuf, ignore: Vec<String>) -> Vec<String> {
 
     if path.is_file() {
       match fs::read_to_string(&path) {
-        Ok(source_file) => res.push(source_file),
+        Ok(source_file) => res.push((path.display().to_string(), source_file)),
         Err(_) => {
           // could not parse "../hyperactos/apps/etl-rs/target/debug/incremental/sales-1s038rym6x4gj/s-ho8rwb01sd-14otzvs-f33yv8dh5075gb83q1vn77uve/work-products.bin" because Error { kind: InvalidData, message: "stream did not contain valid UTF-8" }
           // println!("could not parse {:?} because {:?}", path, e);
@@ -157,7 +149,7 @@ fn main() {
   let trees: Vec<_> = performance!(
     files
       .into_iter()
-      .map(|f| (parser.parse(&f, None).unwrap(), f))
+      .map(|(filename, f)| (filename, parser.parse(&f, None).unwrap(), f))
       .collect(),
     "tree-sitter: parse files into ASTs"
   );
@@ -165,38 +157,11 @@ fn main() {
   let mut items = Vec::new();
 
   performance!(
-    for (tree, source) in &trees {
-      walk_tree(tree.root_node(), source, &mut items);
+    for (filename, tree, source) in &trees {
+      walk_tree(tree.root_node(), source, filename, &mut items);
     },
     "tree-sitter: walk_tree"
   );
 
-  println!("{:?}", items);
-
-  application().run(|cx: &mut App| {
-    cx.on_window_closed(|cx, _window_id| {
-      if cx.windows().is_empty() {
-        cx.quit();
-      }
-    })
-    .detach();
-
-    let bounds = Bounds::centered(None, size(px(500.), px(500.0)), cx);
-    if let Err(err) = cx.open_window(
-      WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        ..Default::default()
-      },
-      |_, cx| {
-        cx.new(|_| Application {
-          text: "World".into(),
-          items,
-        })
-      },
-    ) {
-      eprintln!("Failed to open window: {err}");
-    }
-
-    cx.activate(true);
-  });
+  application::run(items);
 }
