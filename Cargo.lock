@@ -2443,6 +2443,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "lyon_geom"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4836,6 +4846,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "lsp",
  "macros",
  "tree-sitter",
  "tree-sitter-rust",
