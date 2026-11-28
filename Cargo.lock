@@ -1830,6 +1830,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "graph"
+version = "0.1.0"
+dependencies = [
+ "lsp",
+ "macros",
+ "tree-sitter",
+ "tree-sitter-rust",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4846,10 +4856,9 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui_platform",
+ "graph",
  "lsp",
  "macros",
- "tree-sitter",
- "tree-sitter-rust",
 ]
 
 [[package]]

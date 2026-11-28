@@ -6,10 +6,9 @@ edition = "2024"
 [dependencies]
 gpui.workspace = true
 gpui_platform.workspace = true
+graph.workspace = true
 lsp.workspace = true
 macros.workspace = true
-tree-sitter = "0.27.2"
-tree-sitter-rust = "0.24.2"
 
 [lints]
 workspace = true
