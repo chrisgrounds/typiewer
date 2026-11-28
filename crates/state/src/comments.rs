@@ -35,8 +35,6 @@ impl CommentsState {
     self.active_draft.is_some()
   }
 
-  /// Starts a new comment draft on `type_id`, returning the previously drafted `TypeId`
-  /// if a different type was being drafted.
   pub fn start_draft(&mut self, type_id: TypeId) -> Option<TypeId> {
     if let Some(existing) = &self.active_draft {
       if existing.type_id == type_id {
@@ -57,7 +55,6 @@ impl CommentsState {
     None
   }
 
-  /// Cancels the active draft, returning its `TypeId` if one was open.
   pub fn cancel_draft(&mut self) -> Option<TypeId> {
     self.active_draft.take().map(|draft| draft.type_id)
   }
@@ -105,8 +102,6 @@ impl CommentsState {
     true
   }
 
-  /// Commits the active draft into the session comment list if non-empty.
-  /// Always closes the draft and returns its `TypeId` when a draft was open.
   pub fn submit_draft(&mut self) -> Option<TypeId> {
     let draft = self.active_draft.take()?;
     let trimmed = draft.text.trim();

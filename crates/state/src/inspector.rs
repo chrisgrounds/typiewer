@@ -97,14 +97,12 @@ mod tests {
       point2(initial.x - 120.0, initial.y + 100.0)
     );
 
-    // Dragging past top-left clamps to the minimum margin below the top bar.
     assert!(state.update_drag(point2(-500.0, -500.0), vw, vh));
     assert_eq!(
       state.resolved_position(vw, vh),
       point2(INSPECTOR_EDGE_MARGIN, INSPECTOR_MIN_TOP)
     );
 
-    // Dragging past bottom-right keeps the panel reachable inside the viewport.
     assert!(state.update_drag(point2(5000.0, 5000.0), vw, vh));
     assert_eq!(
       state.resolved_position(vw, vh),

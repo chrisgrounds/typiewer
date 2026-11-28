@@ -43,8 +43,6 @@ impl ReadyState {
   }
 }
 
-/// A synchronous JSON-RPC 2.0 client for talking to a language server
-/// (such as `rust-analyzer`) over stdin/stdout.
 pub struct LspClient {
   child: Mutex<Child>,
   writer: Arc<Mutex<BufWriter<ChildStdin>>>,
@@ -56,13 +54,10 @@ pub struct LspClient {
 }
 
 impl LspClient {
-  /// Spawns `rust-analyzer` for the given workspace root and completes the
-  /// LSP `initialize` / `initialized` handshake.
   pub fn start_rust_analyzer(workspace_root: impl AsRef<Path>) -> Result<Self> {
     Self::start_with_command("rust-analyzer", &[], workspace_root)
   }
 
-  /// Spawns an arbitrary LSP server binary and completes the handshake.
   pub fn start_with_command(
     program: &str,
     args: &[&str],
@@ -147,9 +142,6 @@ impl LspClient {
     Ok(client)
   }
 
-  /// Blocks until the language server finishes initial indexing (e.g.
-  /// `rust-analyzer` reports `quiescent: true`, or `$/progress` settles),
-  /// or until `timeout` elapses.
   pub fn wait_until_ready(&self, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     let quiet_window = Duration::from_millis(400);
@@ -193,14 +185,12 @@ impl LspClient {
     }
   }
 
-  /// Reads a Rust source file from disk and sends `textDocument/didOpen`.
   pub fn open_file(&self, path: impl AsRef<Path>) -> Result<Url> {
     let canonical = canonicalize_or_keep(path.as_ref());
     let text = fs::read_to_string(&canonical)?;
     self.did_open(&canonical, &text)
   }
 
-  /// Sends `textDocument/didOpen` with the provided document contents.
   pub fn did_open(&self, path: impl AsRef<Path>, text: &str) -> Result<Url> {
     let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
     self.notify(
@@ -217,12 +207,10 @@ impl LspClient {
     Ok(uri)
   }
 
-  /// Sends `textDocument/definition` and normalizes the response to `Vec<Location>`.
   pub fn definition(&self, path: impl AsRef<Path>, position: Position) -> Result<Vec<Location>> {
     self.goto_request("textDocument/definition", path, position)
   }
 
-  /// Sends `textDocument/typeDefinition` and normalizes the response to `Vec<Location>`.
   pub fn type_definition(
     &self,
     path: impl AsRef<Path>,
@@ -231,7 +219,6 @@ impl LspClient {
     self.goto_request("textDocument/typeDefinition", path, position)
   }
 
-  /// Sends an arbitrary LSP request and deserializes the JSON result.
   pub fn request<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let params_value = serde_json::to_value(params)?;
@@ -263,7 +250,6 @@ impl LspClient {
     Ok(serde_json::from_value(raw_value)?)
   }
 
-  /// Sends an arbitrary LSP notification (no response expected).
   pub fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<()> {
     let params_value = serde_json::to_value(params)?;
     let notif = OutgoingNotification {
@@ -274,7 +260,6 @@ impl LspClient {
     self.write_locked(&notif)
   }
 
-  /// Gracefully shuts down the language server (`shutdown` request + `exit` notification).
   pub fn shutdown(mut self) -> Result<()> {
     let result = self.shutdown_inner();
     if let Some(handle) = self.reader_thread.take() {
@@ -401,7 +386,6 @@ fn reader_loop(
     }
   }
 
-  // Server closed stdout: wake all pending callers and ready waiters.
   if let Ok(mut map) = pending.lock() {
     for (_, tx) in map.drain() {
       let _ = tx.send(Err(LspError::Disconnected));

@@ -58,8 +58,6 @@ fn char_bonus(candidate: &[char], ci: usize, query_ch: char) -> i32 {
   bonus
 }
 
-/// Scores a case-insensitive subsequence match of `query` against `candidate` using
-/// dynamic programming so consecutive runs and word-boundary alignments win over greedy matches.
 pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
   let query_chars: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).collect();
   if query_chars.is_empty() {
@@ -84,9 +82,7 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
   let q_len = query_chars.len();
   let c_len = candidate_chars.len();
 
-  // `match_scores[qi * c_len + ci]` = best score when `query[qi]` matches `candidate[ci]`.
   let mut match_scores = vec![i32::MIN / 4; q_len * c_len];
-  // `prev_col[qi * c_len + ci]` = candidate index that matched `query[qi - 1]`.
   let mut prev_col = vec![usize::MAX; q_len * c_len];
 
   for ci in 0..c_len {
@@ -104,17 +100,14 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
     let prev_row_offset = (qi - 1) * c_len;
     let row_offset = qi * c_len;
 
-    // Track the best non-consecutive predecessor score adjusted for gap extension.
     let mut best_gap_score = i32::MIN / 4;
     let mut best_gap_col = usize::MAX;
 
     for ci in qi..c_len {
-      // Advance existing best_gap_score by one gap step.
       if best_gap_col != usize::MAX {
         best_gap_score += GAP_EXTEND_PENALTY;
       }
 
-      // Consider starting a new gap from `ci - 2` (since `ci - 1` is consecutive, not a gap).
       if ci >= 2 {
         let gap_src_col = ci - 2;
         let gap_src_score = match_scores[prev_row_offset + gap_src_col];
@@ -181,7 +174,6 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
     }
   }
 
-  // Slight tie-breaker favoring shorter candidates (e.g. `Graph` over `GraphEdge`).
   let final_score = best_end_score - (c_len as i32) / 2;
 
   Some(FuzzyMatch {

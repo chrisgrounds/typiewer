@@ -254,7 +254,6 @@ mod tests {
   fn node_position_converts_non_ascii_prefix_to_utf16() {
     let mut parser = Parser::new();
     assert!(parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_ok());
-    // "/* — */ " has an em-dash (3 UTF-8 bytes, 1 UTF-16 code unit).
     let source = "/* — */ struct Foo;";
     let tree = parser.parse(source, None);
     assert!(tree.is_some());
@@ -269,7 +268,6 @@ mod tests {
         &mut functions,
       );
       assert_eq!(types.len(), 1);
-      // "/* — */ struct " is 15 UTF-16 code units (vs 17 UTF-8 bytes).
       assert_eq!(types[0].position, Position::new(0, 15));
       assert_eq!(types[0].kind, TypeKind::Struct);
     }

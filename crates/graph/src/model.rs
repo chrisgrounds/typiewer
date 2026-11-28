@@ -51,8 +51,6 @@ pub struct TypeNode {
   pub position: Position,
 }
 
-/// Lightweight locator for a `TypeNode` used during LSP edge resolution so the
-/// background resolver doesn't need to clone full type bodies.
 #[derive(Debug, Clone)]
 pub struct TypeRef {
   pub id: TypeId,

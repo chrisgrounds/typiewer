@@ -32,15 +32,12 @@ pub struct TypeBlock {
   pub extra_height: RemPx,
 }
 
-/// Computes the extra vertical height occupied by inline comments and an optional comment
-/// composer rendered underneath a type's code inside its type block.
 pub fn comment_section_extra_height(comments: &[String], has_composer: bool) -> RemPx {
   let item_count = comments.len() + usize::from(has_composer);
   if item_count == 0 {
     return RemPx::ZERO;
   }
 
-  // Top margin + top padding + 1px divider border.
   let mut total = RemPx::new(COMMENT_SECTION_GAP_REM * 2.0, 1.0);
   for comment in comments {
     let lines = comment.lines().count().max(1) as f32;
@@ -63,11 +60,8 @@ pub struct FileNode {
   pub file_name: Arc<str>,
   pub types: Vec<TypeBlock>,
   pub collapsed: bool,
-  /// Vertical offset and total height within the parent crate's body content area.
   pub span: VerticalSpan,
-  /// Total height of the card body's inner content area (all type blocks + gaps).
   pub body_content: RemPx,
-  /// Stable minimum width in rems so culling wide off-screen types doesn't cause horizontal jitter.
   pub min_width_rem: f32,
 }
 
@@ -78,11 +72,8 @@ pub struct CrateNode {
   pub total_type_count: usize,
   pub collapsed: bool,
   pub position: Point2,
-  /// Total height of the crate box in its current expanded/collapsed state.
   pub height: RemPx,
-  /// Total height of the crate body's inner content area (all file cards + gaps).
   pub body_content: RemPx,
-  /// Stable minimum width in rems covering the crate header and all contained file cards.
   pub min_width_rem: f32,
 }
 
@@ -187,8 +178,6 @@ pub struct WorkspaceLayout {
 }
 
 impl WorkspaceLayout {
-  /// Groups parsed types by crate and file path, then computes stacked crate/file layouts
-  /// and left-edge anchor points.
   pub fn build(canonical_root: &Path, types: &[TypeNode]) -> Self {
     let mut grouped: BTreeMap<PathBuf, (String, BTreeMap<PathBuf, Vec<&TypeNode>>)> =
       BTreeMap::new();
@@ -318,8 +307,6 @@ impl WorkspaceLayout {
     layout
   }
 
-  /// Recomputes crate positions, file offsets, box heights, edge anchors, and collapsed targets
-  /// after any crate or module is collapsed or expanded.
   pub fn recompute(&mut self) {
     self.type_anchors.clear();
     self.collapsed_targets.clear();
@@ -397,8 +384,6 @@ impl WorkspaceLayout {
     self.type_anchors.get(&type_id).copied()
   }
 
-  /// Updates the extra height (e.g. inline comments / composer) for `type_id` and recomputes
-  /// downstream spans and edge anchors if it changed.
   pub fn set_type_extra_height(&mut self, type_id: TypeId, extra: RemPx) -> bool {
     let Some(&(crate_idx, file_idx)) = self.type_locations.get(&type_id) else {
       return false;
@@ -444,8 +429,6 @@ impl WorkspaceLayout {
     true
   }
 
-  /// Returns the screen-space `(right_x, top_y)` point at the right edge of the crate box
-  /// aligned with the top of `type_id`, or `None` if the type is inside a collapsed crate/file.
   pub fn type_right_anchor(
     &self,
     type_id: TypeId,
@@ -568,8 +551,6 @@ impl WorkspaceLayout {
   }
 }
 
-/// Computes the contiguous range of visible items inside a vertically stacked container, plus
-/// top/bottom spacer heights (in screen px) that preserve exact vertical alignment with anchors.
 fn visible_slice<T>(
   items: &[T],
   span_of: impl Fn(&T) -> VerticalSpan,
@@ -618,8 +599,6 @@ fn visible_slice<T>(
   (first..last, top_spacer_px, bottom_spacer_px)
 }
 
-/// Splits a type body into its first line (header) and remaining lines (rest_body),
-/// returning `(header_line, rest_body, total_line_count, max_line_chars)`.
 fn split_type_body(body: &str) -> (Arc<str>, Option<Arc<str>>, usize, usize) {
   let mut lines = body.lines();
   let Some(first) = lines.next() else {
@@ -865,7 +844,6 @@ mod tests {
     assert_eq!(layout.crates[0].files[0].file_name.as_ref(), "a.rs");
     assert_eq!(layout.crates[1].name.as_ref(), "beta");
 
-    // All crates and files start collapsed by default.
     assert!(layout.crates.iter().all(|c| c.collapsed));
     assert!(
       layout
@@ -880,7 +858,6 @@ mod tests {
       Some(&CollapsedTarget::Crate(0))
     );
 
-    // Expanding crate 0 while its files remain collapsed shifts beta down and targets each file.
     let collapsed_crate_beta_y = layout.crates[1].position.y;
     assert!(layout.toggle_crate(0));
     assert!(layout.crates[1].position.y > collapsed_crate_beta_y);
@@ -894,7 +871,6 @@ mod tests {
       Some(&CollapsedTarget::File(0, 1))
     );
 
-    // ensure_type_expanded expands the target file in O(1) and separates type anchors.
     let beta_y_with_collapsed_files = layout.crates[1].position.y;
     assert!(layout.ensure_type_expanded(TypeId(0)));
     assert!(!layout.ensure_type_expanded(TypeId(0)));

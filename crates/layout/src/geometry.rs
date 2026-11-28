@@ -18,8 +18,6 @@ pub const fn point2(x: f32, y: f32) -> Point2 {
   Point2 { x, y }
 }
 
-/// A 1D layout measurement combining a zoom-scaled `rem` component and a fixed `px` component
-/// (e.g. 1px borders that do not scale with `rem_size`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RemPx {
   pub rem: f32,
@@ -71,7 +69,6 @@ impl Sub for RemPx {
   }
 }
 
-/// Vertical position and height of a stacked child within its parent's body content area.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct VerticalSpan {
   pub offset: RemPx,
