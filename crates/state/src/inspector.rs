@@ -1,9 +1,11 @@
+use layout::metrics::TOP_BAR_HEIGHT;
 use layout::{Point2, point2};
 
 pub const INSPECTOR_WIDTH: f32 = 440.0;
 const INSPECTOR_DEFAULT_RIGHT: f32 = 16.0;
-const INSPECTOR_DEFAULT_TOP: f32 = 44.0;
+const INSPECTOR_DEFAULT_TOP: f32 = TOP_BAR_HEIGHT + 12.0;
 const INSPECTOR_EDGE_MARGIN: f32 = 8.0;
+const INSPECTOR_MIN_TOP: f32 = TOP_BAR_HEIGHT + INSPECTOR_EDGE_MARGIN;
 const INSPECTOR_MIN_VISIBLE_HEIGHT: f32 = 48.0;
 
 #[derive(Default)]
@@ -25,10 +27,10 @@ impl InspectorState {
   pub fn clamp_position(pos: Point2, viewport_width: f32, viewport_height: f32) -> Point2 {
     let max_x =
       (viewport_width - INSPECTOR_WIDTH - INSPECTOR_EDGE_MARGIN).max(INSPECTOR_EDGE_MARGIN);
-    let max_y = (viewport_height - INSPECTOR_MIN_VISIBLE_HEIGHT).max(INSPECTOR_EDGE_MARGIN);
+    let max_y = (viewport_height - INSPECTOR_MIN_VISIBLE_HEIGHT).max(INSPECTOR_MIN_TOP);
     point2(
       pos.x.clamp(INSPECTOR_EDGE_MARGIN, max_x),
-      pos.y.clamp(INSPECTOR_EDGE_MARGIN, max_y),
+      pos.y.clamp(INSPECTOR_MIN_TOP, max_y),
     )
   }
 
@@ -95,11 +97,11 @@ mod tests {
       point2(initial.x - 120.0, initial.y + 100.0)
     );
 
-    // Dragging past top-left clamps to the minimum margin.
+    // Dragging past top-left clamps to the minimum margin below the top bar.
     assert!(state.update_drag(point2(-500.0, -500.0), vw, vh));
     assert_eq!(
       state.resolved_position(vw, vh),
-      point2(INSPECTOR_EDGE_MARGIN, INSPECTOR_EDGE_MARGIN)
+      point2(INSPECTOR_EDGE_MARGIN, INSPECTOR_MIN_TOP)
     );
 
     // Dragging past bottom-right keeps the panel reachable inside the viewport.
@@ -120,6 +122,6 @@ mod tests {
   #[test]
   fn clamp_handles_viewport_smaller_than_inspector() {
     let pos = InspectorState::clamp_position(point2(100.0, 100.0), 300.0, 30.0);
-    assert_eq!(pos, point2(INSPECTOR_EDGE_MARGIN, INSPECTOR_EDGE_MARGIN));
+    assert_eq!(pos, point2(INSPECTOR_EDGE_MARGIN, INSPECTOR_MIN_TOP));
   }
 }

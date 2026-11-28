@@ -28,3 +28,6 @@ pub const CARD_HEADER_HORIZONTAL_PAD_REM: f32 = 2.25;
 pub const CARD_WIDTH_CULL_SAFETY_FACTOR: f32 = 1.15;
 
 pub const EDGE_HIT_SEGMENTS: usize = 32;
+
+// Top bar layout constants (in screen pixels).
+pub const TOP_BAR_HEIGHT: f32 = 36.0;

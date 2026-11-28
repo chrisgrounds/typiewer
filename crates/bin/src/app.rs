@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
   App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
   MouseUpEvent, Pixels, Point, ScrollEvent, Task, TitlebarOptions, Window, WindowBounds,
-  WindowOptions, div, linear_color_stop, linear_gradient, prelude::*, px, rgb, size,
+  WindowOptions, div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
 };
 use gpui_platform::application;
 use graph::{FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
@@ -15,6 +15,16 @@ use lsp::LspClient;
 use state::{Camera, InspectorState, LspStatus, Selection};
 use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
 use ui::inspector::InspectorEvent;
+use ui::top_bar::TopBarEvent;
+
+fn workspace_title(root: &Path) -> String {
+  root
+    .file_name()
+    .and_then(|name| name.to_str())
+    .filter(|name| !name.is_empty())
+    .unwrap_or("typiewer")
+    .to_owned()
+}
 
 pub struct Application {
   canonical_root: PathBuf,
@@ -26,6 +36,7 @@ pub struct Application {
   type_anchors: HashMap<TypeId, Point2>,
   selection: Selection,
   inspector: InspectorState,
+  top_bar_move_pending: bool,
   lsp_status: LspStatus,
   _lsp_task: Task<()>,
   camera: Camera,
@@ -83,6 +94,7 @@ impl Application {
       type_anchors,
       selection: Selection::default(),
       inspector: InspectorState::default(),
+      top_bar_move_pending: false,
       lsp_status: LspStatus::Initialising,
       _lsp_task: lsp_task,
       camera: Camera::default(),
@@ -166,6 +178,38 @@ impl Application {
       }
     }
     cx.notify();
+  }
+
+  fn on_top_bar_event(
+    &mut self,
+    event: TopBarEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    match event {
+      TopBarEvent::MouseDown => {
+        self.top_bar_move_pending = true;
+        cx.stop_propagation();
+      }
+      TopBarEvent::MouseUp => {
+        self.top_bar_move_pending = false;
+      }
+      TopBarEvent::MouseMove => {
+        if self.top_bar_move_pending {
+          self.top_bar_move_pending = false;
+          window.start_window_move();
+          cx.stop_propagation();
+          return;
+        }
+
+        if !self.camera.is_dragging() && !self.inspector.is_dragging() {
+          if self.selection.hovered_edge.take().is_some() {
+            cx.notify();
+          }
+          cx.stop_propagation();
+        }
+      }
+    }
   }
 
   fn on_mouse_down(
@@ -308,6 +352,7 @@ impl Render for Application {
     );
     let lsp_status_badge = ui::hud::render_lsp_status(&self.lsp_status);
     let zoom_badge = ui::hud::render_zoom_badge(self.camera.zoom);
+    let top_bar = ui::top_bar::render_top_bar(cx, Self::on_top_bar_event);
 
     div()
       .id("canvas-root")
@@ -341,6 +386,7 @@ impl Render for Application {
       .when_some(inspector_panel, |el, panel| el.child(panel))
       .when_some(lsp_status_badge, |el, badge| el.child(badge))
       .child(zoom_badge)
+      .child(top_bar)
   }
 }
 
@@ -361,13 +407,17 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
     })
     .detach();
 
+    let canonical_root =
+      std::fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
+    let window_title = workspace_title(&canonical_root);
     let bounds = Bounds::centered(None, size(px(1080.0), px(760.0)), cx);
     if let Err(err) = cx.open_window(
       WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
+          title: Some(window_title.into()),
           appears_transparent: true,
-          ..Default::default()
+          traffic_light_position: Some(point(px(12.0), px(12.0))),
         }),
         ..Default::default()
       },
