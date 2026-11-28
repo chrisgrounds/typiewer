@@ -99,7 +99,8 @@ impl Application {
     _window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    if self.selection.clear() {
+    let ended_drag = self.inspector.end_drag();
+    if self.selection.clear() || ended_drag {
       cx.notify();
     }
   }
@@ -131,10 +132,22 @@ impl Application {
   pub(crate) fn on_mouse_move(
     &mut self,
     event: &MouseMoveEvent,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     let current = point(f32::from(event.position.x), f32::from(event.position.y));
+
+    if self.inspector.is_dragging() {
+      let viewport = window.viewport_size();
+      if self.inspector.update_drag(
+        current,
+        f32::from(viewport.width),
+        f32::from(viewport.height),
+      ) {
+        cx.notify();
+      }
+      return;
+    }
 
     if let Some(last) = self.camera.drag_last_pos {
       self.camera.pan.x += current.x - last.x;
@@ -156,7 +169,9 @@ impl Application {
     _window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    if self.camera.drag_last_pos.take().is_some() {
+    let inspector_ended = self.inspector.end_drag();
+    let camera_ended = self.camera.drag_last_pos.take().is_some();
+    if inspector_ended || camera_ended {
       cx.notify();
     }
   }

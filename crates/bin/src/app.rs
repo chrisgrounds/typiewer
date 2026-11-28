@@ -12,9 +12,10 @@ use lsp::LspClient;
 
 use crate::camera::{Camera, ClearSelection, ResetZoom, ZoomIn, ZoomOut};
 use crate::geometry::ViewportRect;
-use crate::layout::{FileNode, build_file_nodes};
+use crate::layout::{CollapsedTarget, CrateNode, build_crate_nodes, recompute_layout};
 use crate::theme::{VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
 use crate::ui;
+use crate::ui::inspector::InspectorState;
 
 pub enum LspStatus {
   Initialising,
@@ -84,13 +85,15 @@ impl Selection {
 
 pub struct Application {
   pub(crate) canonical_root: PathBuf,
-  pub(crate) nodes: Vec<FileNode>,
+  pub(crate) crates: Vec<CrateNode>,
   pub(crate) types: Vec<TypeNode>,
   pub(crate) functions: Vec<FunctionInfo>,
   pub(crate) edges: Vec<GraphEdge>,
   pub(crate) directed_pairs: HashSet<(TypeId, TypeId)>,
   pub(crate) type_anchors: HashMap<TypeId, Point<f32>>,
+  pub(crate) collapsed_targets: HashMap<TypeId, CollapsedTarget>,
   pub(crate) selection: Selection,
+  pub(crate) inspector: InspectorState,
   pub(crate) lsp_status: LspStatus,
   _lsp_task: Task<()>,
   pub(crate) camera: Camera,
@@ -105,7 +108,7 @@ impl Application {
     let functions_for_lsp = graph.functions.clone();
     let all_types = graph.types.clone();
 
-    let (nodes, type_anchors) = build_file_nodes(&canonical_root, graph.types);
+    let (crates, layout) = build_crate_nodes(&canonical_root, graph.types);
 
     let lsp_task = cx.spawn(async move |this, cx| {
       let result = cx
@@ -140,18 +143,45 @@ impl Application {
 
     Self {
       canonical_root,
-      nodes,
+      crates,
       types: all_types,
       functions: graph.functions,
       edges: graph.edges,
       directed_pairs,
-      type_anchors,
+      type_anchors: layout.type_anchors,
+      collapsed_targets: layout.collapsed_targets,
       selection: Selection::default(),
+      inspector: InspectorState::default(),
       lsp_status: LspStatus::Initialising,
       _lsp_task: lsp_task,
       camera: Camera::default(),
       focus_handle: cx.focus_handle(),
     }
+  }
+
+  pub(crate) fn toggle_crate_collapsed(&mut self, crate_idx: usize) {
+    if let Some(crate_node) = self.crates.get_mut(crate_idx) {
+      crate_node.collapsed = !crate_node.collapsed;
+      self.relayout();
+    }
+  }
+
+  pub(crate) fn toggle_file_collapsed(&mut self, crate_idx: usize, file_idx: usize) {
+    if let Some(file_node) = self
+      .crates
+      .get_mut(crate_idx)
+      .and_then(|c| c.files.get_mut(file_idx))
+    {
+      file_node.collapsed = !file_node.collapsed;
+      self.relayout();
+    }
+  }
+
+  fn relayout(&mut self) {
+    let layout = recompute_layout(&mut self.crates);
+    self.type_anchors = layout.type_anchors;
+    self.collapsed_targets = layout.collapsed_targets;
+    self.selection.hovered_edge = None;
   }
 
   pub(crate) fn relative_display_path(&self, path: &Path) -> String {
@@ -172,13 +202,13 @@ impl Render for Application {
       VIEWPORT_OVERSCAN_X_PX,
       VIEWPORT_OVERSCAN_Y_PX,
     );
-    let is_dragging = self.camera.is_dragging();
+    let is_dragging = self.camera.is_dragging() || self.inspector.is_dragging();
     let is_hovering_edge = self.selection.hovered_edge.is_some();
 
     let dot_grid = ui::background::render_dot_grid(self.camera);
     let file_cards = self.render_visible_file_cards(viewport_rect, cx);
     let edges_layer = self.render_edges_layer(viewport_rect);
-    let inspector_panel = self.render_inspector_panel(cx);
+    let inspector_panel = self.render_inspector_panel(viewport, cx);
     let lsp_status_badge = ui::hud::render_lsp_status(&self.lsp_status);
     let zoom_badge = ui::hud::render_zoom_badge(self.camera.zoom);
 

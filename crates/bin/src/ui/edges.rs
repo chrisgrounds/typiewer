@@ -98,6 +98,14 @@ impl Application {
     let arrow_len = (7.0 * zoom).clamp(4.0, 12.0);
 
     self.edges.iter().filter_map(move |edge| {
+      if let (Some(from_target), Some(to_target)) = (
+        self.collapsed_targets.get(&edge.from),
+        self.collapsed_targets.get(&edge.to),
+      ) && from_target == to_target
+      {
+        return None;
+      }
+
       let from = *self.type_anchors.get(&edge.from)?;
       let to = *self.type_anchors.get(&edge.to)?;
 
