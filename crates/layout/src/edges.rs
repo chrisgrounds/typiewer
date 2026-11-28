@@ -2,12 +2,15 @@ use std::collections::{HashMap, HashSet};
 
 use graph::{EdgeId, GraphEdge, TypeId};
 
+use crate::file_layout::CollapsedTarget;
 use crate::geometry::{EdgeCurve, Point2, ViewportRect, min_dist_sq_to_cubic_bezier, point2};
 use crate::metrics::EDGE_HIT_SEGMENTS;
 
+#[allow(clippy::too_many_arguments)]
 pub fn iter_edge_curves<'a>(
   edges: &'a [GraphEdge],
   type_anchors: &'a HashMap<TypeId, Point2>,
+  collapsed_targets: &'a HashMap<TypeId, CollapsedTarget>,
   directed_pairs: &'a HashSet<(TypeId, TypeId)>,
   pan: Point2,
   zoom: f32,
@@ -17,6 +20,14 @@ pub fn iter_edge_curves<'a>(
   let arrow_len = (7.0 * zoom).clamp(4.0, 12.0);
 
   edges.iter().filter_map(move |edge| {
+    if let (Some(from_target), Some(to_target)) = (
+      collapsed_targets.get(&edge.from),
+      collapsed_targets.get(&edge.to),
+    ) && from_target == to_target
+    {
+      return None;
+    }
+
     let from = *type_anchors.get(&edge.from)?;
     let to = *type_anchors.get(&edge.to)?;
 
@@ -57,6 +68,7 @@ pub fn iter_edge_curves<'a>(
 pub fn hit_test_edge(
   edges: &[GraphEdge],
   type_anchors: &HashMap<TypeId, Point2>,
+  collapsed_targets: &HashMap<TypeId, CollapsedTarget>,
   directed_pairs: &HashSet<(TypeId, TypeId)>,
   pan: Point2,
   zoom: f32,
@@ -75,6 +87,7 @@ pub fn hit_test_edge(
   for curve in iter_edge_curves(
     edges,
     type_anchors,
+    collapsed_targets,
     directed_pairs,
     pan,
     zoom,

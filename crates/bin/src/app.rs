@@ -10,10 +10,14 @@ use gpui::{
 use gpui_platform::application;
 use graph::{FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
 use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
-use layout::{FileNode, Point2, ViewportRect, build_file_nodes, hit_test_edge, point2};
+use layout::{
+  CollapsedTarget, CrateNode, Point2, ViewportRect, build_crate_nodes, hit_test_edge, point2,
+  recompute_layout,
+};
 use lsp::LspClient;
 use state::{Camera, InspectorState, LspStatus, Selection};
 use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
+use ui::file_card::FileCardEvent;
 use ui::inspector::InspectorEvent;
 use ui::top_bar::TopBarEvent;
 
@@ -65,12 +69,13 @@ impl RenderPerf {
 
 pub struct Application {
   canonical_root: PathBuf,
-  nodes: Vec<FileNode>,
+  crates: Vec<CrateNode>,
   types: Vec<TypeNode>,
   functions: Vec<FunctionInfo>,
   edges: Vec<GraphEdge>,
   directed_pairs: HashSet<(TypeId, TypeId)>,
   type_anchors: HashMap<TypeId, Point2>,
+  collapsed_targets: HashMap<TypeId, CollapsedTarget>,
   selection: Selection,
   inspector: InspectorState,
   top_bar_move_pending: bool,
@@ -90,7 +95,7 @@ impl Application {
     let functions_for_lsp = graph.functions.clone();
     let all_types = graph.types.clone();
 
-    let (nodes, type_anchors) = build_file_nodes(&canonical_root, graph.types);
+    let (crates, layout) = build_crate_nodes(&canonical_root, graph.types);
 
     let lsp_task = cx.spawn(async move |this, cx| {
       let result = cx
@@ -141,12 +146,13 @@ impl Application {
 
     Self {
       canonical_root,
-      nodes,
+      crates,
       types: all_types,
       functions: graph.functions,
       edges: graph.edges,
       directed_pairs,
-      type_anchors,
+      type_anchors: layout.type_anchors,
+      collapsed_targets: layout.collapsed_targets,
       selection: Selection::default(),
       inspector: InspectorState::default(),
       top_bar_move_pending: false,
@@ -203,9 +209,49 @@ impl Application {
     }
   }
 
-  fn on_type_click(&mut self, id: TypeId, window: &mut Window, cx: &mut Context<Self>) {
+  fn toggle_crate_collapsed(&mut self, crate_idx: usize) {
+    if let Some(crate_node) = self.crates.get_mut(crate_idx) {
+      crate_node.collapsed = !crate_node.collapsed;
+      self.relayout();
+    }
+  }
+
+  fn toggle_file_collapsed(&mut self, crate_idx: usize, file_idx: usize) {
+    if let Some(file_node) = self
+      .crates
+      .get_mut(crate_idx)
+      .and_then(|c| c.files.get_mut(file_idx))
+    {
+      file_node.collapsed = !file_node.collapsed;
+      self.relayout();
+    }
+  }
+
+  fn relayout(&mut self) {
+    let layout = recompute_layout(&mut self.crates);
+    self.type_anchors = layout.type_anchors;
+    self.collapsed_targets = layout.collapsed_targets;
+    self.selection.hovered_edge = None;
+  }
+
+  fn on_file_card_event(
+    &mut self,
+    event: FileCardEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
     window.focus(&self.focus_handle, cx);
-    self.selection.toggle_type(id, &self.edges);
+    match event {
+      FileCardEvent::SelectType(id) => {
+        self.selection.toggle_type(id, &self.edges);
+      }
+      FileCardEvent::ToggleCrate(crate_idx) => {
+        self.toggle_crate_collapsed(crate_idx);
+      }
+      FileCardEvent::ToggleFile(crate_idx, file_idx) => {
+        self.toggle_file_collapsed(crate_idx, file_idx);
+      }
+    }
     cx.notify();
   }
 
@@ -282,6 +328,7 @@ impl Application {
       && let Some(edge_id) = hit_test_edge(
         &self.edges,
         &self.type_anchors,
+        &self.collapsed_targets,
         &self.directed_pairs,
         self.camera.pan,
         self.camera.zoom,
@@ -329,6 +376,7 @@ impl Application {
       let hovered = hit_test_edge(
         &self.edges,
         &self.type_anchors,
+        &self.collapsed_targets,
         &self.directed_pairs,
         self.camera.pan,
         self.camera.zoom,
@@ -381,17 +429,18 @@ impl Render for Application {
 
     let dot_grid = ui::background::render_dot_grid(self.camera);
     let file_cards = ui::file_card::render_visible_file_cards(
-      &self.nodes,
+      &self.crates,
       &self.edges,
       self.camera,
       &self.selection,
       viewport_rect,
       cx,
-      Self::on_type_click,
+      Self::on_file_card_event,
     );
     let edges_layer = ui::edges::render_edges_layer(
       &self.edges,
       &self.type_anchors,
+      &self.collapsed_targets,
       &self.directed_pairs,
       self.camera,
       &self.selection,

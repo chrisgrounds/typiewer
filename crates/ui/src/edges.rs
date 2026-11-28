@@ -5,7 +5,7 @@ use gpui::{
 };
 use graph::{GraphEdge, TypeId};
 use layout::metrics::EDGE_CULL_PADDING_PX;
-use layout::{EdgeCurve, Point2, ViewportRect, iter_edge_curves, point2};
+use layout::{CollapsedTarget, EdgeCurve, Point2, ViewportRect, iter_edge_curves, point2};
 use state::{Camera, Selection};
 
 #[derive(Clone, Copy)]
@@ -91,6 +91,7 @@ impl EdgeBatch {
 pub fn render_edges_layer(
   edges: &[GraphEdge],
   type_anchors: &HashMap<TypeId, Point2>,
+  collapsed_targets: &HashMap<TypeId, CollapsedTarget>,
   directed_pairs: &HashSet<(TypeId, TypeId)>,
   camera: Camera,
   selection: &Selection,
@@ -105,6 +106,7 @@ pub fn render_edges_layer(
   let styled_curves: Vec<(EdgeCurve, EdgeHighlight)> = iter_edge_curves(
     edges,
     type_anchors,
+    collapsed_targets,
     directed_pairs,
     camera.pan,
     zoom,

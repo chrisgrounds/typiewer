@@ -2355,6 +2355,7 @@ name = "layout"
 version = "0.1.0"
 dependencies = [
  "graph",
+ "lsp",
 ]
 
 [[package]]
