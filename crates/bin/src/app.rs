@@ -18,6 +18,7 @@ use ui::file_card::FileCardEvent;
 use ui::inspector::InspectorEvent;
 use ui::theme::to_point2;
 use ui::top_bar::TopBarEvent;
+use ui::type_context_menu::TypeContextMenuEvent;
 
 use crate::palettes::{
   AppCommand, COMMAND_PALETTE_CONFIG, TYPE_FINDER_CONFIG, build_command_items,
@@ -333,6 +334,19 @@ impl Application {
     cx.notify();
   }
 
+  fn on_type_context_menu_event(
+    &mut self,
+    event: TypeContextMenuEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    window.focus(&self.focus_handle, cx);
+    match event {
+      TypeContextMenuEvent::AddComment(_type_id) => {}
+    }
+    cx.notify();
+  }
+
   fn on_inspector_event(
     &mut self,
     event: InspectorEvent,
@@ -525,6 +539,15 @@ impl Render for Application {
       cx,
       Self::on_inspector_event,
     );
+    let type_context_menu = ui::type_context_menu::render_type_context_menu(
+      &self.graph,
+      &self.layout,
+      self.camera,
+      &self.selection,
+      viewport,
+      cx,
+      Self::on_type_context_menu_event,
+    );
     let lsp_status_badge = ui::hud::render_lsp_status(&self.lsp_status);
     let zoom_badge = self
       .settings
@@ -564,6 +587,7 @@ impl Render for Application {
       .children(file_cards)
       .when_some(edges_layer, |el, edges| el.child(edges))
       .when_some(inspector_panel, |el, panel| el.child(panel))
+      .when_some(type_context_menu, |el, menu| el.child(menu))
       .when_some(lsp_status_badge, |el, badge| el.child(badge))
       .when_some(zoom_badge, |el, badge| el.child(badge))
       .child(top_bar)

@@ -6,3 +6,4 @@ pub mod hud;
 pub mod inspector;
 pub mod theme;
 pub mod top_bar;
+pub mod type_context_menu;

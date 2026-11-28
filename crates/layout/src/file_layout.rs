@@ -366,6 +366,37 @@ impl WorkspaceLayout {
     self.type_anchors.get(&type_id).copied()
   }
 
+  /// Returns the screen-space `(right_x, top_y)` point at the right edge of the crate box
+  /// aligned with the top of `type_id`, or `None` if the type is inside a collapsed crate/file.
+  pub fn type_right_anchor(
+    &self,
+    type_id: TypeId,
+    pan: Point2,
+    zoom: f32,
+    rem_size: f32,
+  ) -> Option<Point2> {
+    let &(crate_idx, file_idx) = self.type_locations.get(&type_id)?;
+    let crate_node = self.crates.get(crate_idx)?;
+    if crate_node.collapsed {
+      return None;
+    }
+    let file_node = crate_node.files.get(file_idx)?;
+    if file_node.collapsed {
+      return None;
+    }
+    let type_block = file_node.types.iter().find(|ty| ty.id == type_id)?;
+
+    let crate_screen_x = crate_node.position.x * zoom + pan.x;
+    let crate_screen_y = crate_node.position.y * zoom + pan.y;
+    let crate_body_top_y = crate_node.body_content_top_y(crate_screen_y, rem_size);
+    let file_screen_y = file_node.screen_top(crate_body_top_y, rem_size);
+    let body_content_top_y = file_node.body_content_top_y(file_screen_y, rem_size);
+    let type_top_y = type_block.span.screen_top(body_content_top_y, rem_size);
+    let crate_right_x = crate_screen_x + crate_node.min_width_rem * rem_size + 2.0;
+
+    Some(point2(crate_right_x, type_top_y))
+  }
+
   pub fn toggle_crate(&mut self, crate_idx: usize) -> bool {
     let Some(crate_node) = self.crates.get_mut(crate_idx) else {
       return false;
