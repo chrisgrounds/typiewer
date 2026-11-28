@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use gpui::{
-  App, Bounds, Context, Entity, FocusHandle, KeyBinding, MouseButton, MouseDownEvent,
+  App, Bounds, Context, Entity, FocusHandle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
   MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, TitlebarOptions,
   Window, WindowBounds, WindowOptions, div, linear_color_stop, linear_gradient, point, prelude::*,
   px, rgb, size,
@@ -10,9 +10,9 @@ use gpui::{
 use gpui_platform::application;
 use graph::{Graph, TypeId, canonicalize_or_keep, resolve_with_rust_analyzer};
 use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
-use layout::{Point2, Rect, WorkspaceLayout, point2};
+use layout::{Point2, Rect, WorkspaceLayout, comment_section_extra_height, point2};
 use palette::{FuzzyPalette, PaletteEvent, ToggleCommandPalette, ToggleFinder};
-use state::{Camera, InspectorState, LspStatus, Selection, ViewerSettings};
+use state::{Camera, CommentsState, InspectorState, LspStatus, Selection, ViewerSettings};
 use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
 use ui::file_card::FileCardEvent;
 use ui::inspector::InspectorEvent;
@@ -47,6 +47,7 @@ pub struct Application {
   graph: Graph,
   layout: WorkspaceLayout,
   selection: Selection,
+  comments: CommentsState,
   inspector: InspectorState,
   settings: ViewerSettings,
   top_bar_move_pending: bool,
@@ -118,6 +119,7 @@ impl Application {
       graph,
       layout,
       selection: Selection::default(),
+      comments: CommentsState::default(),
       inspector: InspectorState::default(),
       settings,
       top_bar_move_pending: false,
@@ -170,9 +172,102 @@ impl Application {
   }
 
   fn clear_selection(&mut self, _: &ClearSelection, _window: &mut Window, cx: &mut Context<Self>) {
+    if self.cancel_active_comment_draft() {
+      cx.notify();
+      return;
+    }
     let ended_drag = self.inspector.end_drag();
     if self.selection.clear() || ended_drag {
       cx.notify();
+    }
+  }
+
+  fn sync_comment_layout(&mut self, type_id: TypeId) {
+    let extra = comment_section_extra_height(
+      self.comments.comments_for(type_id),
+      self.comments.active_draft_for(type_id).is_some(),
+    );
+    if self.layout.set_type_extra_height(type_id, extra) {
+      self.selection.hovered_edge = None;
+    }
+  }
+
+  fn cancel_active_comment_draft(&mut self) -> bool {
+    if let Some(type_id) = self.comments.cancel_draft() {
+      self.sync_comment_layout(type_id);
+      true
+    } else {
+      false
+    }
+  }
+
+  fn submit_active_comment_draft(&mut self) -> bool {
+    if let Some(type_id) = self.comments.submit_draft() {
+      self.sync_comment_layout(type_id);
+      true
+    } else {
+      false
+    }
+  }
+
+  fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_overlay != ActiveOverlay::None || !self.comments.is_drafting() {
+      return;
+    }
+
+    let key = event.keystroke.key.as_str();
+    let mods = &event.keystroke.modifiers;
+
+    // Allow command shortcuts (e.g. cmd-p, cmd-+, cmd-0) to propagate normally.
+    if mods.platform && key != "backspace" {
+      return;
+    }
+
+    match key {
+      "enter" => {
+        cx.stop_propagation();
+        if self.submit_active_comment_draft() {
+          cx.notify();
+        }
+      }
+      "backspace" => {
+        cx.stop_propagation();
+        let changed = if mods.platform {
+          self.comments.clear_draft_text()
+        } else if mods.alt {
+          self.comments.delete_last_word()
+        } else {
+          self.comments.pop_char()
+        };
+        if changed {
+          cx.notify();
+        }
+      }
+      "u" if mods.control => {
+        cx.stop_propagation();
+        if self.comments.clear_draft_text() {
+          cx.notify();
+        }
+      }
+      "w" if mods.control => {
+        cx.stop_propagation();
+        if self.comments.delete_last_word() {
+          cx.notify();
+        }
+      }
+      _ => {
+        if !mods.platform
+          && !mods.control
+          && let Some(key_char) = event.keystroke.key_char.as_deref()
+          && !key_char.is_empty()
+          && !key_char.chars().any(char::is_control)
+        {
+          cx.stop_propagation();
+          if self.comments.push_str(key_char) {
+            cx.notify();
+          }
+        }
+      }
     }
   }
 
@@ -318,6 +413,7 @@ impl Application {
     window.focus(&self.focus_handle, cx);
     match event {
       FileCardEvent::SelectType(id) => {
+        self.cancel_active_comment_draft();
         self.selection.toggle_type(id, &self.graph.edges);
       }
       FileCardEvent::ToggleCrate(crate_idx) => {
@@ -329,6 +425,12 @@ impl Application {
         if self.layout.toggle_file(crate_idx, file_idx) {
           self.selection.hovered_edge = None;
         }
+      }
+      FileCardEvent::SaveComment => {
+        self.submit_active_comment_draft();
+      }
+      FileCardEvent::CancelComment => {
+        self.cancel_active_comment_draft();
       }
     }
     cx.notify();
@@ -342,7 +444,12 @@ impl Application {
   ) {
     window.focus(&self.focus_handle, cx);
     match event {
-      TypeContextMenuEvent::AddComment(_type_id) => {}
+      TypeContextMenuEvent::AddComment(type_id) => {
+        if let Some(prev) = self.comments.start_draft(type_id) {
+          self.sync_comment_layout(prev);
+        }
+        self.sync_comment_layout(type_id);
+      }
     }
     cx.notify();
   }
@@ -426,6 +533,7 @@ impl Application {
     }
 
     if event.button == MouseButton::Left || event.button == MouseButton::Middle {
+      self.cancel_active_comment_draft();
       self.selection.clear();
       self.camera.drag_last_pos = Some(pos);
       cx.notify();
@@ -517,6 +625,7 @@ impl Render for Application {
       &self.layout,
       self.camera,
       &self.selection,
+      &self.comments,
       viewport_rect,
       cx,
       Self::on_file_card_event,
@@ -564,6 +673,7 @@ impl Render for Application {
       .on_action(cx.listener(Self::clear_selection))
       .on_action(cx.listener(Self::toggle_finder))
       .on_action(cx.listener(Self::toggle_command_palette))
+      .on_key_down(cx.listener(Self::on_key_down))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
       .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))

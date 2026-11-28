@@ -9,10 +9,11 @@ use crate::edges;
 use crate::geometry::{EdgeCurve, Point2, Rect, RemPx, VerticalSpan, point2};
 use crate::metrics::{
   BASE_REM_SIZE, BODY_CHAR_WIDTH_REM, BODY_PAD_Y_REM, CARD_BODY_HORIZONTAL_PAD_REM,
-  CARD_HEADER_HORIZONTAL_PAD_REM, CARD_WIDTH_CULL_SAFETY_FACTOR, CRATE_BODY_PAD_X_REM,
-  CRATE_BODY_PAD_Y_REM, CRATE_GAP_Y, CRATE_HEADER_LINE_HEIGHT_REM, CRATE_HEADER_PAD_Y_REM,
-  FILE_GAP_REM, HEADER_CHAR_WIDTH_REM, HEADER_LINE_HEIGHT_REM, HEADER_PAD_Y_REM,
-  TYPE_BLOCK_PAD_Y_REM, TYPE_GAP_REM, TYPE_LINE_HEIGHT_REM,
+  CARD_HEADER_HORIZONTAL_PAD_REM, CARD_WIDTH_CULL_SAFETY_FACTOR, COMMENT_COMPOSER_HEIGHT_REM,
+  COMMENT_GAP_REM, COMMENT_ITEM_PAD_Y_REM, COMMENT_LINE_HEIGHT_REM, COMMENT_SECTION_GAP_REM,
+  CRATE_BODY_PAD_X_REM, CRATE_BODY_PAD_Y_REM, CRATE_GAP_Y, CRATE_HEADER_LINE_HEIGHT_REM,
+  CRATE_HEADER_PAD_Y_REM, FILE_GAP_REM, HEADER_CHAR_WIDTH_REM, HEADER_LINE_HEIGHT_REM,
+  HEADER_PAD_Y_REM, TYPE_BLOCK_PAD_Y_REM, TYPE_GAP_REM, TYPE_LINE_HEIGHT_REM,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -27,6 +28,34 @@ pub struct TypeBlock {
   pub rest_body: Option<Arc<str>>,
   pub rest_line_count: usize,
   pub span: VerticalSpan,
+  pub base_height: RemPx,
+  pub extra_height: RemPx,
+}
+
+/// Computes the extra vertical height occupied by inline comments and an optional comment
+/// composer rendered underneath a type's code inside its type block.
+pub fn comment_section_extra_height(comments: &[String], has_composer: bool) -> RemPx {
+  let item_count = comments.len() + usize::from(has_composer);
+  if item_count == 0 {
+    return RemPx::ZERO;
+  }
+
+  // Top margin + top padding + 1px divider border.
+  let mut total = RemPx::new(COMMENT_SECTION_GAP_REM * 2.0, 1.0);
+  for comment in comments {
+    let lines = comment.lines().count().max(1) as f32;
+    total += RemPx::new(
+      COMMENT_ITEM_PAD_Y_REM * 2.0 + lines * COMMENT_LINE_HEIGHT_REM,
+      2.0,
+    );
+  }
+  if has_composer {
+    total += RemPx::new(COMMENT_COMPOSER_HEIGHT_REM, 2.0);
+  }
+  if item_count > 1 {
+    total += RemPx::rems((item_count - 1) as f32 * COMMENT_GAP_REM);
+  }
+  total
 }
 
 pub struct FileNode {
@@ -205,6 +234,8 @@ impl WorkspaceLayout {
             rest_body,
             rest_line_count: line_count - 1,
             span: VerticalSpan { offset, height },
+            base_height: height,
+            extra_height: RemPx::ZERO,
           });
 
           offset += height;
@@ -364,6 +395,53 @@ impl WorkspaceLayout {
 
   pub fn type_anchor(&self, type_id: TypeId) -> Option<Point2> {
     self.type_anchors.get(&type_id).copied()
+  }
+
+  /// Updates the extra height (e.g. inline comments / composer) for `type_id` and recomputes
+  /// downstream spans and edge anchors if it changed.
+  pub fn set_type_extra_height(&mut self, type_id: TypeId, extra: RemPx) -> bool {
+    let Some(&(crate_idx, file_idx)) = self.type_locations.get(&type_id) else {
+      return false;
+    };
+    let Some(file_node) = self
+      .crates
+      .get_mut(crate_idx)
+      .and_then(|c| c.files.get_mut(file_idx))
+    else {
+      return false;
+    };
+
+    let mut changed = false;
+    for ty in &mut file_node.types {
+      if ty.id == type_id {
+        if (ty.extra_height.rem - extra.rem).abs() > f32::EPSILON
+          || (ty.extra_height.px - extra.px).abs() > f32::EPSILON
+        {
+          ty.extra_height = extra;
+          changed = true;
+        }
+        break;
+      }
+    }
+
+    if !changed {
+      return false;
+    }
+
+    let mut offset = RemPx::ZERO;
+    let type_count = file_node.types.len();
+    for (idx, ty) in file_node.types.iter_mut().enumerate() {
+      let height = ty.base_height + ty.extra_height;
+      ty.span = VerticalSpan { offset, height };
+      offset += height;
+      if idx + 1 < type_count {
+        offset += RemPx::rems(TYPE_GAP_REM);
+      }
+    }
+    file_node.body_content = offset;
+    file_node.recompute_dimensions();
+    self.recompute();
+    true
   }
 
   /// Returns the screen-space `(right_x, top_y)` point at the right edge of the crate box

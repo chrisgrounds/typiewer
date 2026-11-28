@@ -1,13 +1,10 @@
-use gpui::{
-  AnyElement, BoxShadow, Context, FontWeight, MouseButton, Pixels, Size, Window, div, point,
-  prelude::*, px, rgb, rgba,
-};
+use gpui::{AnyElement, Context, MouseButton, Pixels, Size, Window, div, prelude::*, px};
 use graph::{Graph, TypeId};
 use layout::WorkspaceLayout;
 use layout::metrics::TOP_BAR_HEIGHT;
 use state::{Camera, Selection};
 
-use crate::theme::SKY_TEXT;
+use crate::primitives::{SurfaceVariant, menu_item, popover_header, surface};
 
 const MENU_WIDTH_PX: f32 = 196.0;
 const MENU_ESTIMATED_HEIGHT_PX: f32 = 84.0;
@@ -42,26 +39,12 @@ pub fn render_type_context_menu<V: 'static>(
   let menu_y = anchor.y.clamp(min_y, max_y);
 
   Some(
-    div()
+    surface(SurfaceVariant::Popover)
       .id("type-context-menu")
       .absolute()
       .left(px(menu_x))
       .top(px(menu_y))
       .w(px(MENU_WIDTH_PX))
-      .flex()
-      .flex_col()
-      .overflow_hidden()
-      .rounded(px(10.0))
-      .bg(rgba(0x11131af2))
-      .border_1()
-      .border_color(rgba(0x38bdf844))
-      .shadow(vec![BoxShadow {
-        inset: false,
-        color: rgba(0x000000b0).into(),
-        offset: point(px(0.), px(12.)),
-        blur_radius: px(28.),
-        spread_radius: px(-4.),
-      }])
       .on_mouse_down(
         MouseButton::Left,
         cx.listener(|_, _, _, cx| cx.stop_propagation()),
@@ -70,50 +53,17 @@ pub fn render_type_context_menu<V: 'static>(
         MouseButton::Middle,
         cx.listener(|_, _, _, cx| cx.stop_propagation()),
       )
+      .child(popover_header(format!("{} {}", ty.kind, ty.name)))
       .child(
-        div()
-          .px(px(12.0))
-          .py(px(7.0))
-          .border_b_1()
-          .border_color(rgba(0xffffff10))
-          .bg(rgba(0x38bdf80d))
-          .text_size(px(11.0))
-          .font_weight(FontWeight::MEDIUM)
-          .text_color(rgb(SKY_TEXT))
-          .whitespace_nowrap()
-          .overflow_hidden()
-          .child(format!("{} {}", ty.kind, ty.name)),
-      )
-      .child(
-        div().p(px(5.0)).flex().flex_col().gap(px(2.0)).child(
-          div()
-            .id("type-context-add-comment")
-            .cursor_pointer()
-            .px(px(9.0))
-            .py(px(7.0))
-            .rounded(px(6.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .text_size(px(12.5))
-            .text_color(rgb(0xe2e8f0))
-            .hover(|el| el.bg(rgba(0x38bdf81c)).text_color(rgb(0xf8fafc)))
-            .on_mouse_down(
-              MouseButton::Left,
-              cx.listener(move |this, _, window, cx| {
-                cx.stop_propagation();
-                on_event(this, TypeContextMenuEvent::AddComment(type_id), window, cx);
-              }),
-            )
-            .child(
-              div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(SKY_TEXT))
-                .child("+"),
-            )
-            .child("Add a comment"),
-        ),
+        div().p(px(5.0)).flex().flex_col().gap(px(2.0)).child(menu_item(
+          "type-context-add-comment",
+          Some("+"),
+          "Add a comment",
+          cx,
+          move |this, window, cx| {
+            on_event(this, TypeContextMenuEvent::AddComment(type_id), window, cx);
+          },
+        )),
       )
       .into_any_element(),
   )

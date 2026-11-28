@@ -1,9 +1,11 @@
 pub mod actions;
 pub mod background;
+pub mod comment_box;
 pub mod edges;
 pub mod file_card;
 pub mod hud;
 pub mod inspector;
+pub mod primitives;
 pub mod theme;
 pub mod top_bar;
 pub mod type_context_menu;

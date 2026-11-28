@@ -16,6 +16,13 @@ pub const TYPE_BLOCK_PAD_Y_REM: f32 = 0.5;
 pub const TYPE_LINE_HEIGHT_REM: f32 = 1.35;
 pub const TYPE_GAP_REM: f32 = 0.625;
 
+// Inline comment section layout constants (in `rems`, shared between `layout` and `ui`).
+pub const COMMENT_SECTION_GAP_REM: f32 = 0.5;
+pub const COMMENT_ITEM_PAD_Y_REM: f32 = 0.375;
+pub const COMMENT_LINE_HEIGHT_REM: f32 = 1.25;
+pub const COMMENT_GAP_REM: f32 = 0.375;
+pub const COMMENT_COMPOSER_HEIGHT_REM: f32 = 4.25;
+
 // Viewport culling overscan margins (in screen pixels).
 pub const VIEWPORT_OVERSCAN_X_PX: f32 = 64.0;
 pub const VIEWPORT_OVERSCAN_Y_PX: f32 = 64.0;

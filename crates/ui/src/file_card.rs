@@ -9,8 +9,9 @@ use layout::metrics::{
   TYPE_BLOCK_PAD_Y_REM, TYPE_GAP_REM, TYPE_LINE_HEIGHT_REM,
 };
 use layout::{FileNode, Rect, WorkspaceLayout};
-use state::{Camera, Selection};
+use state::{Camera, CommentsState, Selection};
 
+use crate::comment_box::{CommentBoxEvent, render_type_comments};
 use crate::theme::{GRAY_500, MONO_FONT, SKY_TEXT, SLATE_400, SLATE_500, pluralize};
 
 #[derive(Clone, Copy, Debug)]
@@ -18,20 +19,25 @@ pub enum FileCardEvent {
   SelectType(TypeId),
   ToggleCrate(usize),
   ToggleFile(usize, usize),
+  SaveComment,
+  CancelComment,
 }
 
 struct CardRenderCtx<'a> {
   graph: &'a Graph,
   camera: Camera,
   selection: &'a Selection,
+  comments: &'a CommentsState,
   viewport_rect: Rect,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_visible_file_cards<V: 'static>(
   graph: &Graph,
   layout: &WorkspaceLayout,
   camera: Camera,
   selection: &Selection,
+  comments: &CommentsState,
   viewport_rect: Rect,
   cx: &mut Context<V>,
   on_event: impl Fn(&mut V, FileCardEvent, &mut Window, &mut Context<V>) + Copy + 'static,
@@ -44,6 +50,7 @@ pub fn render_visible_file_cards<V: 'static>(
     graph,
     camera,
     selection,
+    comments,
     viewport_rect,
   };
 
@@ -258,6 +265,20 @@ fn render_file_card<V: 'static>(
           (rgba(0xffffff04), rgba(0xffffff0d))
         };
 
+        let comments_section = render_type_comments(
+          id,
+          rctx.comments.comments_for(id),
+          rctx.comments.active_draft_for(id),
+          cx,
+          move |this, ev, window, cx| {
+            let mapped = match ev {
+              CommentBoxEvent::Save => FileCardEvent::SaveComment,
+              CommentBoxEvent::Cancel => FileCardEvent::CancelComment,
+            };
+            on_event(this, mapped, window, cx);
+          },
+        );
+
         div()
           .id(("type", id.0))
           .cursor_pointer()
@@ -297,6 +318,7 @@ fn render_file_card<V: 'static>(
                 .child(SharedString::from(rest.clone())),
             )
           })
+          .when_some(comments_section, |el, section| el.child(section))
       }))
       .when(bottom_spacer_px > 0.0, |el| {
         el.child(div().h(px(bottom_spacer_px)))
