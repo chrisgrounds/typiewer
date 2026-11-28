@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
   App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -26,6 +26,43 @@ fn workspace_title(root: &Path) -> String {
     .to_owned()
 }
 
+const RENDER_PERF_LOG_INTERVAL: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct RenderPerf {
+  frames: u32,
+  total: Duration,
+  max: Duration,
+}
+
+impl RenderPerf {
+  fn record(&mut self, duration: Duration) {
+    self.frames += 1;
+    self.total += duration;
+    if duration > self.max {
+      self.max = duration;
+    }
+  }
+
+  fn flush_and_log(&mut self) {
+    if self.frames == 0 {
+      return;
+    }
+
+    let avg_ms = (self.total.as_secs_f64() * 1000.0) / f64::from(self.frames);
+    let max_ms = self.max.as_secs_f64() * 1000.0;
+    let label = if self.frames == 1 { "frame" } else { "frames" };
+    println!(
+      "[perf] {} {label} | render avg {avg_ms:.1}ms, max {max_ms:.1}ms",
+      self.frames
+    );
+
+    self.frames = 0;
+    self.total = Duration::ZERO;
+    self.max = Duration::ZERO;
+  }
+}
+
 pub struct Application {
   canonical_root: PathBuf,
   nodes: Vec<FileNode>,
@@ -39,6 +76,8 @@ pub struct Application {
   top_bar_move_pending: bool,
   lsp_status: LspStatus,
   _lsp_task: Task<()>,
+  render_perf: RenderPerf,
+  _perf_log_task: Task<()>,
   camera: Camera,
   focus_handle: FocusHandle,
 }
@@ -82,6 +121,22 @@ impl Application {
       });
     });
 
+    let perf_log_task = cx.spawn(async move |this, cx| {
+      loop {
+        cx.background_executor()
+          .timer(RENDER_PERF_LOG_INTERVAL)
+          .await;
+        if this
+          .update(cx, |app, _cx| {
+            app.render_perf.flush_and_log();
+          })
+          .is_err()
+        {
+          break;
+        }
+      }
+    });
+
     let directed_pairs = graph.edges.iter().map(|e| (e.from, e.to)).collect();
 
     Self {
@@ -97,6 +152,8 @@ impl Application {
       top_bar_move_pending: false,
       lsp_status: LspStatus::Initialising,
       _lsp_task: lsp_task,
+      render_perf: RenderPerf::default(),
+      _perf_log_task: perf_log_task,
       camera: Camera::default(),
       focus_handle: cx.focus_handle(),
     }
@@ -311,6 +368,7 @@ impl Application {
 
 impl Render for Application {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let render_start = Instant::now();
     let viewport = window.viewport_size();
     let viewport_rect = ViewportRect::from_size(
       f32::from(viewport.width),
@@ -354,7 +412,7 @@ impl Render for Application {
     let zoom_badge = ui::hud::render_zoom_badge(self.camera.zoom);
     let top_bar = ui::top_bar::render_top_bar(cx, Self::on_top_bar_event);
 
-    div()
+    let root = div()
       .id("canvas-root")
       .track_focus(&self.focus_handle)
       .on_action(cx.listener(Self::zoom_in))
@@ -386,7 +444,10 @@ impl Render for Application {
       .when_some(inspector_panel, |el, panel| el.child(panel))
       .when_some(lsp_status_badge, |el, badge| el.child(badge))
       .child(zoom_badge)
-      .child(top_bar)
+      .child(top_bar);
+
+    self.render_perf.record(render_start.elapsed());
+    root
   }
 }
 
