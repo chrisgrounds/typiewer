@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufReader, BufWriter};
+use std::marker::PhantomData;
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -40,6 +41,34 @@ impl ReadyState {
       last_activity: Instant::now(),
       disconnected: false,
     }
+  }
+}
+
+pub struct PendingRequest<R> {
+  rx: mpsc::Receiver<Result<Value>>,
+  _marker: PhantomData<R>,
+}
+
+impl<R: DeserializeOwned> PendingRequest<R> {
+  pub fn wait(self) -> Result<R> {
+    let raw_value = self.rx.recv().map_err(|_| LspError::Disconnected)??;
+    Ok(serde_json::from_value(raw_value)?)
+  }
+}
+
+pub struct PendingLocations {
+  inner: PendingRequest<Option<GotoDefinitionResponse>>,
+}
+
+impl PendingLocations {
+  pub fn wait(self) -> Result<Vec<Location>> {
+    Ok(
+      self
+        .inner
+        .wait()?
+        .map(GotoDefinitionResponse::into_locations)
+        .unwrap_or_default(),
+    )
   }
 }
 
@@ -122,6 +151,28 @@ impl LspClient {
         "uri": root_uri.as_str(),
         "name": workspace_name,
       }],
+      "initializationOptions": {
+        "cachePriming": { "enable": false },
+        "checkOnSave": false,
+        "diagnostics": { "enable": false },
+        "cargo": {
+          "allTargets": false,
+          "buildScripts": { "enable": true },
+        },
+        "procMacro": { "enable": true },
+        "lens": { "enable": false },
+        "inlayHints": {
+          "bindingModeHints": { "enable": false },
+          "chainingHints": { "enable": false },
+          "closingBraceHints": { "enable": false },
+          "parameterHints": { "enable": false },
+          "typeHints": { "enable": false },
+        },
+        "completion": {
+          "autoimport": { "enable": false },
+          "postfix": { "enable": false },
+        },
+      },
       "capabilities": {
         "window": {
           "workDoneProgress": true,
@@ -208,7 +259,7 @@ impl LspClient {
   }
 
   pub fn definition(&self, path: impl AsRef<Path>, position: Position) -> Result<Vec<Location>> {
-    self.goto_request("textDocument/definition", path, position)
+    self.definition_async(path, position)?.wait()
   }
 
   pub fn type_definition(
@@ -216,10 +267,30 @@ impl LspClient {
     path: impl AsRef<Path>,
     position: Position,
   ) -> Result<Vec<Location>> {
-    self.goto_request("textDocument/typeDefinition", path, position)
+    self.type_definition_async(path, position)?.wait()
   }
 
-  pub fn request<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
+  pub fn definition_async(
+    &self,
+    path: impl AsRef<Path>,
+    position: Position,
+  ) -> Result<PendingLocations> {
+    self.goto_request_async("textDocument/definition", path, position)
+  }
+
+  pub fn type_definition_async(
+    &self,
+    path: impl AsRef<Path>,
+    position: Position,
+  ) -> Result<PendingLocations> {
+    self.goto_request_async("textDocument/typeDefinition", path, position)
+  }
+
+  pub fn send_request<P: Serialize, R: DeserializeOwned>(
+    &self,
+    method: &str,
+    params: P,
+  ) -> Result<PendingRequest<R>> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let params_value = serde_json::to_value(params)?;
     let (tx, rx) = mpsc::channel();
@@ -246,8 +317,14 @@ impl LspClient {
       return Err(err);
     }
 
-    let raw_value = rx.recv().map_err(|_| LspError::Disconnected)??;
-    Ok(serde_json::from_value(raw_value)?)
+    Ok(PendingRequest {
+      rx,
+      _marker: PhantomData,
+    })
+  }
+
+  pub fn request<P: Serialize, R: DeserializeOwned>(&self, method: &str, params: P) -> Result<R> {
+    self.send_request(method, params)?.wait()
   }
 
   pub fn notify<P: Serialize>(&self, method: &str, params: P) -> Result<()> {
@@ -268,25 +345,21 @@ impl LspClient {
     result
   }
 
-  fn goto_request(
+  fn goto_request_async(
     &self,
     method: &str,
     path: impl AsRef<Path>,
     position: Position,
-  ) -> Result<Vec<Location>> {
+  ) -> Result<PendingLocations> {
     let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    let response: Option<GotoDefinitionResponse> = self.request(
+    let inner = self.send_request(
       method,
       json!({
         "textDocument": { "uri": uri.as_str() },
         "position": position,
       }),
     )?;
-    Ok(
-      response
-        .map(GotoDefinitionResponse::into_locations)
-        .unwrap_or_default(),
-    )
+    Ok(PendingLocations { inner })
   }
 
   fn write_locked<T: Serialize>(&self, msg: &T) -> Result<()> {

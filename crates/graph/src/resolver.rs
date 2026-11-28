@@ -2,12 +2,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use lsp::{Location, LspClient, Position};
+use lsp::{Location, LspClient, PendingLocations, Position};
 
 use crate::model::{
-  EdgeId, FunctionId, FunctionInfo, GraphEdge, GraphResolution, TypeId, TypeRef,
+  EdgeId, FunctionId, FunctionInfo, GraphEdge, GraphResolution, TypeId, TypeRef, TypeRefSite,
   canonicalize_or_keep,
 };
+
+const PIPELINE_BATCH_SIZE: usize = 64;
 
 pub fn resolve_with_rust_analyzer(
   workspace_root: &Path,
@@ -20,6 +22,25 @@ pub fn resolve_with_rust_analyzer(
   let resolution = resolve_edges(type_refs, functions, &lsp);
   let _ = lsp.shutdown();
   Ok(resolution)
+}
+
+#[derive(Clone, Copy)]
+enum RefSlot {
+  Input,
+  Output,
+}
+
+struct PendingDef {
+  func_idx: usize,
+  slot: RefSlot,
+  site: TypeRefSite,
+  pending: PendingLocations,
+}
+
+struct PendingTypeDef {
+  func_idx: usize,
+  slot: RefSlot,
+  pending: PendingLocations,
 }
 
 pub fn resolve_edges(
@@ -44,24 +65,83 @@ pub fn resolve_edges(
   }
 
   let mut canonical_cache: HashMap<PathBuf, PathBuf> = HashMap::new();
+  let mut input_seen: Vec<HashSet<TypeId>> = vec![HashSet::new(); functions.len()];
+  let mut output_seen: Vec<HashSet<TypeId>> = vec![HashSet::new(); functions.len()];
+
+  let mut work: Vec<(usize, RefSlot, TypeRefSite)> = Vec::new();
+  for (func_idx, func) in functions.iter().enumerate() {
+    for &site in &func.param_type_refs {
+      work.push((func_idx, RefSlot::Input, site));
+    }
+    for &site in &func.return_type_refs {
+      work.push((func_idx, RefSlot::Output, site));
+    }
+  }
+
+  // Pipeline definition requests in batches so rust-analyzer can evaluate them concurrently.
+  for chunk in work.chunks(PIPELINE_BATCH_SIZE) {
+    let mut in_flight: Vec<PendingDef> = Vec::with_capacity(chunk.len());
+    for &(func_idx, slot, site) in chunk {
+      let file_path = &functions[func_idx].file_path;
+      if let Ok(pending) = lsp.definition_async(file_path, site.position) {
+        in_flight.push(PendingDef {
+          func_idx,
+          slot,
+          site,
+          pending,
+        });
+      }
+    }
+
+    let mut fallback_in_flight: Vec<PendingTypeDef> = Vec::new();
+    for item in in_flight {
+      let matched = item.pending.wait().is_ok_and(|locations| {
+        let (seen, target) = match item.slot {
+          RefSlot::Input => (
+            &mut input_seen[item.func_idx],
+            &mut functions[item.func_idx].input_types,
+          ),
+          RefSlot::Output => (
+            &mut output_seen[item.func_idx],
+            &mut functions[item.func_idx].output_types,
+          ),
+        };
+        collect_matching_types(locations, &type_index, &mut canonical_cache, seen, target)
+      });
+
+      // Only fall back to `typeDefinition` for `Self` / `self` references, skipping
+      // external standard/third-party types that won't resolve to a workspace type.
+      if !matched && item.site.needs_type_def_fallback {
+        let file_path = &functions[item.func_idx].file_path;
+        if let Ok(pending) = lsp.type_definition_async(file_path, item.site.position) {
+          fallback_in_flight.push(PendingTypeDef {
+            func_idx: item.func_idx,
+            slot: item.slot,
+            pending,
+          });
+        }
+      }
+    }
+
+    for item in fallback_in_flight {
+      if let Ok(locations) = item.pending.wait() {
+        let (seen, target) = match item.slot {
+          RefSlot::Input => (
+            &mut input_seen[item.func_idx],
+            &mut functions[item.func_idx].input_types,
+          ),
+          RefSlot::Output => (
+            &mut output_seen[item.func_idx],
+            &mut functions[item.func_idx].output_types,
+          ),
+        };
+        collect_matching_types(locations, &type_index, &mut canonical_cache, seen, target);
+      }
+    }
+  }
+
   let mut edge_map: BTreeMap<(TypeId, TypeId), Vec<FunctionId>> = BTreeMap::new();
-
-  for func in &mut functions {
-    func.input_types = resolve_type_refs(
-      &func.file_path,
-      &func.param_type_refs,
-      &type_index,
-      &mut canonical_cache,
-      lsp,
-    );
-    func.output_types = resolve_type_refs(
-      &func.file_path,
-      &func.return_type_refs,
-      &type_index,
-      &mut canonical_cache,
-      lsp,
-    );
-
+  for func in &functions {
     let pairs = function_edge_pairs(&func.input_types, &func.output_types);
     for (from, to) in pairs {
       let entry = edge_map.entry((from, to)).or_default();
@@ -112,31 +192,6 @@ fn collect_matching_types(
   matched
 }
 
-fn resolve_type_refs(
-  file_path: &Path,
-  refs: &[Position],
-  type_index: &HashMap<(PathBuf, Position), TypeId>,
-  canonical_cache: &mut HashMap<PathBuf, PathBuf>,
-  lsp: &LspClient,
-) -> Vec<TypeId> {
-  let mut resolved = Vec::new();
-  let mut seen = HashSet::new();
-
-  for &ref_pos in refs {
-    let matched = lsp.definition(file_path, ref_pos).is_ok_and(|locations| {
-      collect_matching_types(locations, type_index, canonical_cache, &mut seen, &mut resolved)
-    });
-
-    // Fall back to `typeDefinition` for `Self` (whose `definition` points to the
-    // `impl` block) and `self` parameters (whose `definition` points to themselves).
-    if !matched && let Ok(locations) = lsp.type_definition(file_path, ref_pos) {
-      collect_matching_types(locations, type_index, canonical_cache, &mut seen, &mut resolved);
-    }
-  }
-
-  resolved
-}
-
 fn function_edge_pairs(input_types: &[TypeId], output_types: &[TypeId]) -> Vec<(TypeId, TypeId)> {
   let mut pairs = Vec::new();
   let mut seen = HashSet::new();
@@ -169,14 +224,14 @@ mod tests {
 
   #[test]
   fn function_edge_pairs_connects_inputs_to_outputs() {
-    let pairs = function_edge_pairs(&[TypeId(0), TypeId(1)], &[TypeId(2)]);
-    assert_eq!(pairs, vec![(TypeId(0), TypeId(2)), (TypeId(1), TypeId(2))]);
+    let pairs = function_edge_pairs(&[TypeId(1), TypeId(2)], &[TypeId(3)]);
+    assert_eq!(pairs, vec![(TypeId(1), TypeId(3)), (TypeId(2), TypeId(3))]);
   }
 
   #[test]
   fn function_edge_pairs_skips_self_loops() {
-    let pairs = function_edge_pairs(&[TypeId(0), TypeId(1)], &[TypeId(0)]);
-    assert_eq!(pairs, vec![(TypeId(1), TypeId(0))]);
+    let pairs = function_edge_pairs(&[TypeId(1), TypeId(2)], &[TypeId(1)]);
+    assert_eq!(pairs, vec![(TypeId(2), TypeId(1))]);
   }
 
   #[test]

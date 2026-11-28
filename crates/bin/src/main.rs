@@ -6,7 +6,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use graph::{Graph, TypeRef, parse_workspace, resolve_with_rust_analyzer};
+use graph::{
+  Graph, TypeRef, canonicalize_or_keep, compute_workspace_fingerprint, load_cached_resolution,
+  parse_workspace, resolve_with_rust_analyzer, save_cached_resolution,
+};
 use macros::performance;
 
 const USAGE: &str = "Usage: typiewer [--project <PATH>] [--dump]";
@@ -145,14 +148,33 @@ fn main() -> ExitCode {
   let mut graph = Graph::from_parsed(parsed.types, parsed.functions);
 
   if cli.dump {
-    let type_refs: Vec<TypeRef> = graph.type_refs();
-    let functions = std::mem::take(&mut graph.functions);
-    match performance!(
-      resolve_with_rust_analyzer(&root, &type_refs, functions, Duration::from_secs(60)),
-      "lsp: resolve_with_rust_analyzer"
+    let canonical_root = canonicalize_or_keep(&root);
+    let fingerprint = compute_workspace_fingerprint(&canonical_root, &graph);
+    if let Some(cached) = load_cached_resolution(
+      &canonical_root,
+      fingerprint,
+      &graph.functions,
+      graph.types.len(),
     ) {
-      Ok(resolution) => graph.apply_resolution(resolution),
-      Err(err) => eprintln!("Failed to resolve graph via LSP: {err}"),
+      graph.apply_resolution(cached);
+    } else {
+      let type_refs: Vec<TypeRef> = graph.type_refs();
+      let functions = std::mem::take(&mut graph.functions);
+      match performance!(
+        resolve_with_rust_analyzer(
+          &canonical_root,
+          &type_refs,
+          functions,
+          Duration::from_secs(60),
+        ),
+        "lsp: resolve_with_rust_analyzer"
+      ) {
+        Ok(resolution) => {
+          save_cached_resolution(&canonical_root, fingerprint, &resolution);
+          graph.apply_resolution(resolution);
+        }
+        Err(err) => eprintln!("Failed to resolve graph via LSP: {err}"),
+      }
     }
 
     dump_graph(&graph);

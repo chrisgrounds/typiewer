@@ -5,7 +5,9 @@ use lsp::Position;
 use macros::performance;
 use tree_sitter::{Node, Parser};
 
-use crate::model::{FunctionId, FunctionInfo, TypeId, TypeKind, TypeNode, canonicalize_or_keep};
+use crate::model::{
+  FunctionId, FunctionInfo, TypeId, TypeKind, TypeNode, TypeRefSite, canonicalize_or_keep,
+};
 
 #[derive(Debug)]
 pub struct ParsedWorkspace {
@@ -100,10 +102,20 @@ fn node_position(node: Node, source: &str) -> Position {
   Position::new(point.row as u32, utf16_col as u32)
 }
 
-fn collect_type_refs(node: Node, source: &str, acc: &mut Vec<Position>) {
+fn collect_type_refs(node: Node, source: &str, acc: &mut Vec<TypeRefSite>) {
   match node.kind() {
-    "type_identifier" | "self_type" | "self" => {
-      acc.push(node_position(node, source));
+    "type_identifier" => {
+      acc.push(TypeRefSite {
+        position: node_position(node, source),
+        needs_type_def_fallback: false,
+      });
+      return;
+    }
+    "self_type" | "self" => {
+      acc.push(TypeRefSite {
+        position: node_position(node, source),
+        needs_type_def_fallback: true,
+      });
       return;
     }
     // Don't descend into nested function/type declarations (they collect their own refs).

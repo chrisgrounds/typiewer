@@ -3,12 +3,15 @@ use std::time::Duration;
 
 use gpui::{
   App, Bounds, Context, Entity, FocusHandle, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
-  MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, TitlebarOptions,
-  Window, WindowBounds, WindowOptions, div, linear_color_stop, linear_gradient, point, prelude::*,
-  px, rgb, size,
+  MouseMoveEvent, MouseUpEvent, PinchEvent, Pixels, Point, ScrollEvent, Subscription, Task,
+  TitlebarOptions, Window, WindowBounds, WindowOptions, div, linear_color_stop, linear_gradient,
+  point, prelude::*, px, rgb, size,
 };
 use gpui_platform::application;
-use graph::{Graph, TypeId, canonicalize_or_keep, resolve_with_rust_analyzer};
+use graph::{
+  Graph, TypeId, canonicalize_or_keep, compute_workspace_fingerprint, load_cached_resolution,
+  resolve_with_rust_analyzer, save_cached_resolution,
+};
 use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
 use layout::{Point2, Rect, WorkspaceLayout, comment_section_extra_height, point2};
 use palette::{FuzzyPalette, PaletteEvent, ToggleCommandPalette, ToggleFinder};
@@ -52,7 +55,7 @@ pub struct Application {
   settings: ViewerSettings,
   top_bar_move_pending: bool,
   lsp_status: LspStatus,
-  _lsp_task: Task<()>,
+  _lsp_task: Option<Task<()>>,
   camera: Camera,
   focus_handle: FocusHandle,
   finder: Entity<FuzzyPalette<TypeId>>,
@@ -65,43 +68,55 @@ pub struct Application {
 impl Application {
   fn new(
     canonical_root: PathBuf,
-    graph: Graph,
+    mut graph: Graph,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
     let layout = WorkspaceLayout::build(&canonical_root, &graph.types);
+    let fingerprint = compute_workspace_fingerprint(&canonical_root, &graph);
 
-    let lsp_root = canonical_root.clone();
-    let type_refs = graph.type_refs();
-    let functions_for_lsp = graph.functions.clone();
+    let (lsp_status, lsp_task) = if let Some(cached) =
+      load_cached_resolution(&canonical_root, fingerprint, &graph.functions, graph.types.len())
+    {
+      graph.apply_resolution(cached);
+      (LspStatus::Ready, None)
+    } else {
+      let lsp_root = canonical_root.clone();
+      let type_refs = graph.type_refs();
+      let functions_for_lsp = graph.functions.clone();
 
-    let lsp_task = cx.spawn(async move |this, cx| {
-      let result = cx
-        .background_executor()
-        .spawn(async move {
-          resolve_with_rust_analyzer(
-            &lsp_root,
-            &type_refs,
-            functions_for_lsp,
-            Duration::from_secs(60),
-          )
-        })
-        .await;
+      let task = cx.spawn(async move |this, cx| {
+        let result = cx
+          .background_executor()
+          .spawn(async move {
+            let resolution = resolve_with_rust_analyzer(
+              &lsp_root,
+              &type_refs,
+              functions_for_lsp,
+              Duration::from_secs(60),
+            )?;
+            save_cached_resolution(&lsp_root, fingerprint, &resolution);
+            Ok::<_, lsp::LspError>(resolution)
+          })
+          .await;
 
-      let _ = this.update(cx, |app, cx| {
-        match result {
-          Ok(resolution) => {
-            app.graph.apply_resolution(resolution);
-            app.selection.refresh_connected_types(&app.graph.edges);
-            app.lsp_status = LspStatus::Ready;
+        let _ = this.update(cx, |app, cx| {
+          match result {
+            Ok(resolution) => {
+              app.graph.apply_resolution(resolution);
+              app.selection.refresh_connected_types(&app.graph.edges);
+              app.lsp_status = LspStatus::Ready;
+            }
+            Err(err) => {
+              app.lsp_status = LspStatus::Failed(err.to_string());
+            }
           }
-          Err(err) => {
-            app.lsp_status = LspStatus::Failed(err.to_string());
-          }
-        }
-        cx.notify();
+          cx.notify();
+        });
       });
-    });
+
+      (LspStatus::Initialising, Some(task))
+    };
 
     let settings = ViewerSettings::default();
     let finder_items = build_type_finder_items(&canonical_root, &graph.types);
@@ -123,7 +138,7 @@ impl Application {
       inspector: InspectorState::default(),
       settings,
       top_bar_move_pending: false,
-      lsp_status: LspStatus::Initialising,
+      lsp_status,
       _lsp_task: lsp_task,
       camera: Camera::default(),
       focus_handle: cx.focus_handle(),
@@ -602,6 +617,15 @@ impl Application {
       cx.notify();
     }
   }
+
+  fn on_pinch(&mut self, event: &PinchEvent, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_overlay != ActiveOverlay::None {
+      return;
+    }
+
+    let factor = event.delta.exp().clamp(0.5, 2.0);
+    self.set_zoom_around(self.camera.zoom * factor, to_point2(event.position), window, cx);
+  }
 }
 
 impl Render for Application {
@@ -681,6 +705,7 @@ impl Render for Application {
       .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_mouse_up))
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_scroll(cx.listener(Self::on_scroll))
+      .on_pinch(cx.listener(Self::on_pinch))
       .relative()
       .size_full()
       .overflow_hidden()

@@ -68,6 +68,12 @@ impl From<&TypeNode> for TypeRef {
   }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TypeRefSite {
+  pub position: Position,
+  pub needs_type_def_fallback: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionInfo {
   pub id: FunctionId,
@@ -76,8 +82,8 @@ pub struct FunctionInfo {
   pub position: Position,
   pub params: String,
   pub return_type: Option<String>,
-  pub param_type_refs: Vec<Position>,
-  pub return_type_refs: Vec<Position>,
+  pub param_type_refs: Vec<TypeRefSite>,
+  pub return_type_refs: Vec<TypeRefSite>,
   pub input_types: Vec<TypeId>,
   pub output_types: Vec<TypeId>,
 }
