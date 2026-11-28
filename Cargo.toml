@@ -3,6 +3,9 @@ resolver = "3"
 members = [
   "crates/*"
 ]
+default-members = [
+  "crates/bin"
+]
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
