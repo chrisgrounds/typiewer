@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_platform::application;
 use graph::{
-  Graph, TypeId, canonicalize_or_keep, compute_workspace_fingerprint, load_cached_resolution,
+  Graph, TypeId, canonicalize_or_keep, compute_workspace_checksum, load_cached_resolution,
   resolve_with_rust_analyzer, save_cached_resolution,
 };
 use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
@@ -73,10 +73,10 @@ impl Application {
     cx: &mut Context<Self>,
   ) -> Self {
     let layout = WorkspaceLayout::build(&canonical_root, &graph.types);
-    let fingerprint = compute_workspace_fingerprint(&canonical_root, &graph);
+    let checksum = compute_workspace_checksum(&canonical_root, &graph);
 
     let (lsp_status, lsp_task) = if let Some(cached) =
-      load_cached_resolution(&canonical_root, fingerprint, &graph.functions, graph.types.len())
+      load_cached_resolution(&canonical_root, checksum, &graph.functions, graph.types.len())
     {
       graph.apply_resolution(cached);
       (LspStatus::Ready, None)
@@ -95,7 +95,7 @@ impl Application {
               functions_for_lsp,
               Duration::from_secs(60),
             )?;
-            save_cached_resolution(&lsp_root, fingerprint, &resolution);
+            save_cached_resolution(&lsp_root, checksum, &resolution);
             Ok::<_, lsp::LspError>(resolution)
           })
           .await;

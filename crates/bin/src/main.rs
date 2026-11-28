@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use graph::{
-  Graph, TypeRef, canonicalize_or_keep, compute_workspace_fingerprint, load_cached_resolution,
+  Graph, TypeRef, canonicalize_or_keep, compute_workspace_checksum, load_cached_resolution,
   parse_workspace, resolve_with_rust_analyzer, save_cached_resolution,
 };
 use macros::performance;
@@ -149,10 +149,10 @@ fn main() -> ExitCode {
 
   if cli.dump {
     let canonical_root = canonicalize_or_keep(&root);
-    let fingerprint = compute_workspace_fingerprint(&canonical_root, &graph);
+    let checksum = compute_workspace_checksum(&canonical_root, &graph);
     if let Some(cached) = load_cached_resolution(
       &canonical_root,
-      fingerprint,
+      checksum,
       &graph.functions,
       graph.types.len(),
     ) {
@@ -170,7 +170,7 @@ fn main() -> ExitCode {
         "lsp: resolve_with_rust_analyzer"
       ) {
         Ok(resolution) => {
-          save_cached_resolution(&canonical_root, fingerprint, &resolution);
+          save_cached_resolution(&canonical_root, checksum, &resolution);
           graph.apply_resolution(resolution);
         }
         Err(err) => eprintln!("Failed to resolve graph via LSP: {err}"),

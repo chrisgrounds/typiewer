@@ -25,7 +25,7 @@ struct CachedFunctionTypes {
 #[derive(Serialize, Deserialize)]
 struct CachedResolution {
   version: u32,
-  fingerprint: u64,
+  checksum: u64,
   edges: Vec<CachedEdge>,
   function_types: Vec<CachedFunctionTypes>,
 }
@@ -121,9 +121,9 @@ fn collect_manifest_files(root: &Path, acc: &mut BTreeSet<PathBuf>) {
   }
 }
 
-/// Computes a deterministic fingerprint over the parsed types/functions and the metadata
+/// Computes a deterministic checksum over the parsed types/functions and the metadata
 /// (size + mtime) of all referenced `.rs` files and workspace `Cargo.toml`/`Cargo.lock` files.
-pub fn compute_workspace_fingerprint(canonical_root: &Path, graph: &Graph) -> u64 {
+pub fn compute_workspace_checksum(canonical_root: &Path, graph: &Graph) -> u64 {
   let mut hasher = Fnv1a::new();
   hasher.update_u64(u64::from(CACHE_VERSION));
 
@@ -163,33 +163,33 @@ pub fn compute_workspace_fingerprint(canonical_root: &Path, graph: &Graph) -> u6
 
 pub fn load_cached_resolution(
   canonical_root: &Path,
-  fingerprint: u64,
+  checksum: u64,
   functions: &[FunctionInfo],
   type_count: usize,
 ) -> Option<GraphResolution> {
   let path = cache_file_path(canonical_root);
-  load_cached_resolution_from(&path, fingerprint, functions, type_count)
+  load_cached_resolution_from(&path, checksum, functions, type_count)
 }
 
 pub fn save_cached_resolution(
   canonical_root: &Path,
-  fingerprint: u64,
+  checksum: u64,
   resolution: &GraphResolution,
 ) {
   let path = cache_file_path(canonical_root);
-  let _ = save_cached_resolution_to(&path, fingerprint, resolution);
+  let _ = save_cached_resolution_to(&path, checksum, resolution);
 }
 
 fn load_cached_resolution_from(
   cache_path: &Path,
-  fingerprint: u64,
+  checksum: u64,
   functions: &[FunctionInfo],
   type_count: usize,
 ) -> Option<GraphResolution> {
   let raw = fs::read_to_string(cache_path).ok()?;
   let cached: CachedResolution = serde_json::from_str(&raw).ok()?;
   if cached.version != CACHE_VERSION
-    || cached.fingerprint != fingerprint
+    || cached.checksum != checksum
     || cached.function_types.len() != functions.len()
   {
     return None;
@@ -230,7 +230,7 @@ fn load_cached_resolution_from(
 
 fn save_cached_resolution_to(
   cache_path: &Path,
-  fingerprint: u64,
+  checksum: u64,
   resolution: &GraphResolution,
 ) -> std::io::Result<()> {
   if let Some(parent) = cache_path.parent() {
@@ -239,7 +239,7 @@ fn save_cached_resolution_to(
 
   let payload = CachedResolution {
     version: CACHE_VERSION,
-    fingerprint,
+    checksum,
     edges: resolution
       .edges
       .iter()
@@ -290,7 +290,7 @@ mod tests {
   }
 
   #[test]
-  fn cache_round_trips_and_rejects_mismatched_fingerprint() {
+  fn cache_round_trips_and_rejects_mismatched_checksum() {
     let dir = std::env::temp_dir().join(format!("typiewer-cache-test-{}", std::process::id()));
     let cache_path = dir.join("graph.json");
 
@@ -320,7 +320,7 @@ mod tests {
       assert_eq!(loaded.functions[0].output_types, vec![TypeId(1)]);
     }
 
-    // Wrong fingerprint invalidates the cache.
+    // Wrong checksum invalidates the cache.
     assert!(load_cached_resolution_from(&cache_path, 99, &base_fns, 2).is_none());
 
     let _ = fs::remove_dir_all(&dir);
