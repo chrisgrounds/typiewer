@@ -44,6 +44,7 @@ pub fn parse_workspace(root: &Path, ignore: &[String]) -> Result<ParsedWorkspace
         tree.root_node(),
         source,
         file_path,
+        None,
         &mut types,
         &mut functions,
       );
@@ -107,7 +108,7 @@ fn collect_type_refs(node: Node, source: &str, acc: &mut Vec<TypeRefSite>) {
     "type_identifier" => {
       acc.push(TypeRefSite {
         position: node_position(node, source),
-        needs_type_def_fallback: false,
+        needs_type_def_fallback: node_text(node, source) == "Self",
       });
       return;
     }
@@ -139,10 +140,90 @@ fn parse_type_kind(node_kind: &str) -> Option<TypeKind> {
   }
 }
 
+fn format_self_parameter(raw: &str, self_type: &str) -> String {
+  let trimmed = raw.trim();
+  if let Some(prefix) = trimmed.strip_suffix("self") {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+      return format!("self: {self_type}");
+    }
+    if prefix == "mut" {
+      return format!("mut self: {self_type}");
+    }
+    if prefix.starts_with('&') {
+      let sep = if prefix == "&" { "" } else { " " };
+      return format!("self: {prefix}{sep}{self_type}");
+    }
+  }
+  trimmed.to_owned()
+}
+
+fn collect_self_replacements(
+  node: Node,
+  source: &str,
+  self_type: &str,
+  edits: &mut Vec<(usize, usize, String)>,
+) {
+  match node.kind() {
+    "self_parameter" => {
+      let raw = node_text(node, source);
+      if !raw.contains(':') {
+        edits.push((
+          node.start_byte(),
+          node.end_byte(),
+          format_self_parameter(raw, self_type),
+        ));
+        return;
+      }
+    }
+    "self_type" => {
+      edits.push((node.start_byte(), node.end_byte(), self_type.to_owned()));
+      return;
+    }
+    "type_identifier" if node_text(node, source) == "Self" => {
+      edits.push((node.start_byte(), node.end_byte(), self_type.to_owned()));
+      return;
+    }
+    _ => {}
+  }
+
+  let mut cursor = node.walk();
+  for child in node.children(&mut cursor) {
+    collect_self_replacements(child, source, self_type, edits);
+  }
+}
+
+fn substitute_self(node: Node, source: &str, self_type: &str) -> String {
+  let mut edits = Vec::new();
+  collect_self_replacements(node, source, self_type, &mut edits);
+  if edits.is_empty() {
+    return node_text(node, source).to_owned();
+  }
+
+  edits.sort_by_key(|(start, _, _)| *start);
+  let base = node.start_byte();
+  let raw = node_text(node, source);
+  let mut out = String::with_capacity(raw.len() + self_type.len() * edits.len());
+  let mut cursor = 0;
+
+  for (start, end, replacement) in edits {
+    let rel_start = start.saturating_sub(base);
+    let rel_end = end.saturating_sub(base);
+    if rel_start >= cursor && rel_end <= raw.len() {
+      out.push_str(&raw[cursor..rel_start]);
+      out.push_str(&replacement);
+      cursor = rel_end;
+    }
+  }
+  out.push_str(&raw[cursor..]);
+  out
+}
+
 fn walk_tree(
   node: Node,
   source: &str,
   file_path: &Path,
+  enclosing_type: Option<&str>,
   types: &mut Vec<TypeNode>,
   functions: &mut Vec<FunctionInfo>,
 ) {
@@ -176,12 +257,18 @@ fn walk_tree(
 
     let params = node
       .child_by_field_name("parameters")
-      .map(|n| node_text(n, source).to_string())
+      .map(|n| match enclosing_type {
+        Some(self_ty) => substitute_self(n, source, self_ty),
+        None => node_text(n, source).to_string(),
+      })
       .unwrap_or_default();
 
     let return_type = node
       .child_by_field_name("return_type")
-      .map(|n| node_text(n, source).to_string());
+      .map(|n| match enclosing_type {
+        Some(self_ty) => substitute_self(n, source, self_ty),
+        None => node_text(n, source).to_string(),
+      });
 
     let id = FunctionId(functions.len());
     functions.push(FunctionInfo {
@@ -198,9 +285,21 @@ fn walk_tree(
     });
   }
 
+  let child_enclosing = match node.kind() {
+    "impl_item" => node
+      .child_by_field_name("type")
+      .map(|n| node_text(n, source))
+      .or(enclosing_type),
+    "trait_item" => node
+      .child_by_field_name("name")
+      .map(|n| node_text(n, source))
+      .or(enclosing_type),
+    _ => enclosing_type,
+  };
+
   let mut cursor = node.walk();
   for child in node.children(&mut cursor) {
-    walk_tree(child, source, file_path, types, functions);
+    walk_tree(child, source, file_path, child_enclosing, types, functions);
   }
 }
 
@@ -276,12 +375,59 @@ mod tests {
         tree.root_node(),
         source,
         Path::new("lib.rs"),
+        None,
         &mut types,
         &mut functions,
       );
       assert_eq!(types.len(), 1);
       assert_eq!(types[0].position, Position::new(0, 15));
       assert_eq!(types[0].kind, TypeKind::Struct);
+    }
+  }
+
+  #[test]
+  fn walk_tree_substitutes_self_and_self_type_in_impl_methods() {
+    let mut parser = Parser::new();
+    assert!(parser.set_language(&tree_sitter_rust::LANGUAGE.into()).is_ok());
+
+    let source = r#"
+struct Graph;
+impl Graph {
+  fn new() -> Self { Graph }
+  fn func(&self, self_id: u32) -> Option<&Self> { None }
+  fn mutate(&mut self, myself: &str) {}
+  fn consume(self) -> Self { self }
+  fn consume_mut(mut self) {}
+  fn lifetime<'a>(&'a mut self) {}
+  fn boxed(self: Box<Self>) {}
+}
+"#;
+    let tree = parser.parse(source, None);
+    assert!(tree.is_some());
+    if let Some(tree) = tree {
+      let mut types = Vec::new();
+      let mut functions = Vec::new();
+      walk_tree(
+        tree.root_node(),
+        source,
+        Path::new("model.rs"),
+        None,
+        &mut types,
+        &mut functions,
+      );
+      let sigs: Vec<String> = functions.iter().map(FunctionInfo::signature).collect();
+      assert_eq!(
+        sigs,
+        vec![
+          "fn new() -> Graph",
+          "fn func(self: &Graph, self_id: u32) -> Option<&Graph>",
+          "fn mutate(self: &mut Graph, myself: &str)",
+          "fn consume(self: Graph) -> Graph",
+          "fn consume_mut(mut self: Graph)",
+          "fn lifetime(self: &'a mut Graph)",
+          "fn boxed(self: Box<Graph>)",
+        ]
+      );
     }
   }
 }
