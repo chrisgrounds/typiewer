@@ -15,6 +15,9 @@ expect_used = "deny"
 gpui = { git = "https://github.com/zed-industries/zed.git" }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", features = ["font-kit"] }
 graph = { path = "crates/graph" }
+layout = { path = "crates/layout" }
 lsp = { path = "crates/lsp" }
 macros = { path = "crates/macros" }
+state = { path = "crates/state" }
+ui = { path = "crates/ui" }
 

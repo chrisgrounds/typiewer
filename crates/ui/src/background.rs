@@ -1,6 +1,5 @@
 use gpui::{Bounds, canvas, fill, point, prelude::*, px, rgba, size};
-
-use crate::camera::Camera;
+use state::Camera;
 
 pub fn render_dot_grid(camera: Camera) -> impl IntoElement {
   let pan = camera.pan;

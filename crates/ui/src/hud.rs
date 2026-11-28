@@ -1,6 +1,5 @@
 use gpui::{AnyElement, div, prelude::*, px, rgb, rgba};
-
-use crate::app::LspStatus;
+use state::LspStatus;
 
 pub fn render_lsp_status(status: &LspStatus) -> Option<AnyElement> {
   let (dot_color, label) = match status {

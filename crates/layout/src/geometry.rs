@@ -1,5 +1,20 @@
-use gpui::{Point, point};
 use graph::EdgeId;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Point2 {
+  pub x: f32,
+  pub y: f32,
+}
+
+impl Point2 {
+  pub const fn new(x: f32, y: f32) -> Self {
+    Self { x, y }
+  }
+}
+
+pub const fn point2(x: f32, y: f32) -> Point2 {
+  Point2 { x, y }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct ViewportRect {
@@ -27,11 +42,11 @@ impl ViewportRect {
 #[derive(Clone, Copy)]
 pub struct EdgeCurve {
   pub edge_id: EdgeId,
-  pub p0: Point<f32>,
-  pub c1: Point<f32>,
-  pub c2: Point<f32>,
-  pub p3: Point<f32>,
-  pub arrow_tip: Point<f32>,
+  pub p0: Point2,
+  pub c1: Point2,
+  pub c2: Point2,
+  pub p3: Point2,
+  pub arrow_tip: Point2,
 }
 
 impl EdgeCurve {
@@ -72,25 +87,19 @@ impl EdgeCurve {
   }
 }
 
-pub fn eval_cubic_bezier(
-  p0: Point<f32>,
-  c1: Point<f32>,
-  c2: Point<f32>,
-  p3: Point<f32>,
-  t: f32,
-) -> Point<f32> {
+pub fn eval_cubic_bezier(p0: Point2, c1: Point2, c2: Point2, p3: Point2, t: f32) -> Point2 {
   let u = 1.0 - t;
   let uu = u * u;
   let tt = t * t;
   let uuu = uu * u;
   let ttt = tt * t;
-  point(
+  point2(
     uuu * p0.x + 3.0 * uu * t * c1.x + 3.0 * u * tt * c2.x + ttt * p3.x,
     uuu * p0.y + 3.0 * uu * t * c1.y + 3.0 * u * tt * c2.y + ttt * p3.y,
   )
 }
 
-pub fn point_to_segment_dist_sq(p: Point<f32>, a: Point<f32>, b: Point<f32>) -> f32 {
+pub fn point_to_segment_dist_sq(p: Point2, a: Point2, b: Point2) -> f32 {
   let ab_x = b.x - a.x;
   let ab_y = b.y - a.y;
   let len_sq = ab_x * ab_x + ab_y * ab_y;
@@ -109,11 +118,11 @@ pub fn point_to_segment_dist_sq(p: Point<f32>, a: Point<f32>, b: Point<f32>) -> 
 }
 
 pub fn min_dist_sq_to_cubic_bezier(
-  p: Point<f32>,
-  p0: Point<f32>,
-  c1: Point<f32>,
-  c2: Point<f32>,
-  p3: Point<f32>,
+  p: Point2,
+  p0: Point2,
+  c1: Point2,
+  c2: Point2,
+  p3: Point2,
   segments: usize,
 ) -> f32 {
   let steps = segments.max(1);
@@ -136,26 +145,26 @@ pub fn min_dist_sq_to_cubic_bezier(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::theme::EDGE_CULL_PADDING_PX;
+  use crate::metrics::EDGE_CULL_PADDING_PX;
 
   #[test]
   fn point_to_segment_distance_computes_exact_perpendicular() {
-    let d_sq = point_to_segment_dist_sq(point(5.0, 3.0), point(0.0, 0.0), point(10.0, 0.0));
+    let d_sq = point_to_segment_dist_sq(point2(5.0, 3.0), point2(0.0, 0.0), point2(10.0, 0.0));
     assert!((d_sq - 9.0).abs() < 1e-4);
   }
 
   #[test]
   fn cubic_bezier_hit_detects_midpoint_and_rejects_far_point() {
-    let p0 = point(200.0, 100.0);
-    let c1 = point(100.0, 100.0);
-    let c2 = point(100.0, 200.0);
-    let p3 = point(200.0, 200.0);
+    let p0 = point2(200.0, 100.0);
+    let c1 = point2(100.0, 100.0);
+    let c2 = point2(100.0, 200.0);
+    let p3 = point2(200.0, 200.0);
     let mid = eval_cubic_bezier(p0, c1, c2, p3, 0.5);
 
-    let near = min_dist_sq_to_cubic_bezier(point(mid.x + 2.0, mid.y), p0, c1, c2, p3, 32);
+    let near = min_dist_sq_to_cubic_bezier(point2(mid.x + 2.0, mid.y), p0, c1, c2, p3, 32);
     assert!(near < 9.0);
 
-    let far = min_dist_sq_to_cubic_bezier(point(mid.x + 40.0, mid.y), p0, c1, c2, p3, 32);
+    let far = min_dist_sq_to_cubic_bezier(point2(mid.x + 40.0, mid.y), p0, c1, c2, p3, 32);
     assert!(far > 1000.0);
   }
 
@@ -179,11 +188,11 @@ mod tests {
     // Long vertical edge starting above viewport and ending below viewport
     let spanning = EdgeCurve {
       edge_id: EdgeId(0),
-      p0: point(300.0, -200.0),
-      c1: point(100.0, -200.0),
-      c2: point(100.0, 1100.0),
-      p3: point(296.0, 1100.0),
-      arrow_tip: point(300.0, 1100.0),
+      p0: point2(300.0, -200.0),
+      c1: point2(100.0, -200.0),
+      c2: point2(100.0, 1100.0),
+      p3: point2(296.0, 1100.0),
+      arrow_tip: point2(300.0, 1100.0),
     };
     let (min_x, min_y, max_x, max_y) = spanning.aabb(EDGE_CULL_PADDING_PX);
     assert!(vp.intersects(min_x, min_y, max_x, max_y));
@@ -191,11 +200,11 @@ mod tests {
     // Edge completely above the viewport
     let above = EdgeCurve {
       edge_id: EdgeId(1),
-      p0: point(300.0, -500.0),
-      c1: point(200.0, -500.0),
-      c2: point(200.0, -300.0),
-      p3: point(296.0, -300.0),
-      arrow_tip: point(300.0, -300.0),
+      p0: point2(300.0, -500.0),
+      c1: point2(200.0, -500.0),
+      c2: point2(200.0, -300.0),
+      p3: point2(296.0, -300.0),
+      arrow_tip: point2(300.0, -300.0),
     };
     let (min_x, min_y, max_x, max_y) = above.aabb(EDGE_CULL_PADDING_PX);
     assert!(!vp.intersects(min_x, min_y, max_x, max_y));
@@ -203,11 +212,11 @@ mod tests {
     // Edge completely to the right of the viewport
     let right = EdgeCurve {
       edge_id: EdgeId(2),
-      p0: point(1400.0, 200.0),
-      c1: point(1300.0, 200.0),
-      c2: point(1300.0, 300.0),
-      p3: point(1396.0, 300.0),
-      arrow_tip: point(1400.0, 300.0),
+      p0: point2(1400.0, 200.0),
+      c1: point2(1300.0, 200.0),
+      c2: point2(1300.0, 300.0),
+      p3: point2(1396.0, 300.0),
+      arrow_tip: point2(1400.0, 300.0),
     };
     let (min_x, min_y, max_x, max_y) = right.aabb(EDGE_CULL_PADDING_PX);
     assert!(!vp.intersects(min_x, min_y, max_x, max_y));

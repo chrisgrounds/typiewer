@@ -7,8 +7,11 @@ edition = "2024"
 gpui.workspace = true
 gpui_platform.workspace = true
 graph.workspace = true
+layout.workspace = true
 lsp.workspace = true
 macros.workspace = true
+state.workspace = true
+ui.workspace = true
 
 [lints]
 workspace = true

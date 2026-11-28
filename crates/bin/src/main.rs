@@ -1,9 +1,4 @@
 mod app;
-mod camera;
-mod geometry;
-mod layout;
-mod theme;
-mod ui;
 
 use std::fs;
 use std::path::{Path, PathBuf};

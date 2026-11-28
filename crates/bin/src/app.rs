@@ -1,103 +1,35 @@
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-  App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, Point, Task, TitlebarOptions, Window,
-  WindowBounds, WindowOptions, div, linear_color_stop, linear_gradient, prelude::*, px, rgb, size,
+  App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
+  MouseUpEvent, Pixels, Point, ScrollEvent, Task, TitlebarOptions, Window, WindowBounds,
+  WindowOptions, div, linear_color_stop, linear_gradient, prelude::*, px, rgb, size,
 };
 use gpui_platform::application;
-use graph::{EdgeId, FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
+use graph::{FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
+use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
+use layout::{FileNode, Point2, ViewportRect, build_file_nodes, hit_test_edge, point2};
 use lsp::LspClient;
-
-use crate::camera::{Camera, ClearSelection, ResetZoom, ZoomIn, ZoomOut};
-use crate::geometry::ViewportRect;
-use crate::layout::{CollapsedTarget, CrateNode, build_crate_nodes, recompute_layout};
-use crate::theme::{VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
-use crate::ui;
-use crate::ui::inspector::InspectorState;
-
-pub enum LspStatus {
-  Initialising,
-  Ready,
-  Failed(String),
-}
-
-#[derive(Default)]
-pub struct Selection {
-  pub selected_type: Option<TypeId>,
-  pub selected_edge: Option<EdgeId>,
-  pub hovered_edge: Option<EdgeId>,
-  pub connected_types: HashSet<TypeId>,
-}
-
-impl Selection {
-  pub fn select_type(&mut self, id: TypeId, edges: &[GraphEdge]) {
-    self.selected_edge = None;
-    self.selected_type = Some(id);
-    self.refresh_connected_types(edges);
-  }
-
-  pub fn toggle_type(&mut self, id: TypeId, edges: &[GraphEdge]) {
-    self.selected_edge = None;
-    self.selected_type = if self.selected_type == Some(id) {
-      None
-    } else {
-      Some(id)
-    };
-    self.refresh_connected_types(edges);
-  }
-
-  pub fn toggle_edge(&mut self, id: EdgeId) {
-    self.selected_type = None;
-    self.connected_types.clear();
-    self.selected_edge = if self.selected_edge == Some(id) {
-      None
-    } else {
-      Some(id)
-    };
-  }
-
-  pub fn clear(&mut self) -> bool {
-    if self.selected_type.is_some() || self.selected_edge.is_some() {
-      self.selected_type = None;
-      self.selected_edge = None;
-      self.connected_types.clear();
-      true
-    } else {
-      false
-    }
-  }
-
-  pub fn refresh_connected_types(&mut self, edges: &[GraphEdge]) {
-    self.connected_types.clear();
-    if let Some(sel) = self.selected_type {
-      for edge in edges {
-        if edge.from == sel {
-          self.connected_types.insert(edge.to);
-        } else if edge.to == sel {
-          self.connected_types.insert(edge.from);
-        }
-      }
-    }
-  }
-}
+use state::{Camera, InspectorState, LspStatus, Selection};
+use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
+use ui::inspector::InspectorEvent;
 
 pub struct Application {
-  pub(crate) canonical_root: PathBuf,
-  pub(crate) crates: Vec<CrateNode>,
-  pub(crate) types: Vec<TypeNode>,
-  pub(crate) functions: Vec<FunctionInfo>,
-  pub(crate) edges: Vec<GraphEdge>,
-  pub(crate) directed_pairs: HashSet<(TypeId, TypeId)>,
-  pub(crate) type_anchors: HashMap<TypeId, Point<f32>>,
-  pub(crate) collapsed_targets: HashMap<TypeId, CollapsedTarget>,
-  pub(crate) selection: Selection,
-  pub(crate) inspector: InspectorState,
-  pub(crate) lsp_status: LspStatus,
+  canonical_root: PathBuf,
+  nodes: Vec<FileNode>,
+  types: Vec<TypeNode>,
+  functions: Vec<FunctionInfo>,
+  edges: Vec<GraphEdge>,
+  directed_pairs: HashSet<(TypeId, TypeId)>,
+  type_anchors: HashMap<TypeId, Point2>,
+  selection: Selection,
+  inspector: InspectorState,
+  lsp_status: LspStatus,
   _lsp_task: Task<()>,
-  pub(crate) camera: Camera,
-  pub(crate) focus_handle: FocusHandle,
+  camera: Camera,
+  focus_handle: FocusHandle,
 }
 
 impl Application {
@@ -108,7 +40,7 @@ impl Application {
     let functions_for_lsp = graph.functions.clone();
     let all_types = graph.types.clone();
 
-    let (crates, layout) = build_crate_nodes(&canonical_root, graph.types);
+    let (nodes, type_anchors) = build_file_nodes(&canonical_root, graph.types);
 
     let lsp_task = cx.spawn(async move |this, cx| {
       let result = cx
@@ -143,13 +75,12 @@ impl Application {
 
     Self {
       canonical_root,
-      crates,
+      nodes,
       types: all_types,
       functions: graph.functions,
       edges: graph.edges,
       directed_pairs,
-      type_anchors: layout.type_anchors,
-      collapsed_targets: layout.collapsed_targets,
+      type_anchors,
       selection: Selection::default(),
       inspector: InspectorState::default(),
       lsp_status: LspStatus::Initialising,
@@ -159,37 +90,178 @@ impl Application {
     }
   }
 
-  pub(crate) fn toggle_crate_collapsed(&mut self, crate_idx: usize) {
-    if let Some(crate_node) = self.crates.get_mut(crate_idx) {
-      crate_node.collapsed = !crate_node.collapsed;
-      self.relayout();
+  fn set_zoom_around(
+    &mut self,
+    new_zoom: f32,
+    focal: Point2,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    if self.camera.zoom_around(new_zoom, focal) {
+      window.set_rem_size(px(self.camera.rem_size()));
+      cx.notify();
     }
   }
 
-  pub(crate) fn toggle_file_collapsed(&mut self, crate_idx: usize, file_idx: usize) {
-    if let Some(file_node) = self
-      .crates
-      .get_mut(crate_idx)
-      .and_then(|c| c.files.get_mut(file_idx))
+  fn zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
+    let viewport = window.viewport_size();
+    let center = point2(
+      f32::from(viewport.width) * 0.5,
+      f32::from(viewport.height) * 0.5,
+    );
+    self.set_zoom_around(self.camera.zoom * 1.15, center, window, cx);
+  }
+
+  fn zoom_out(&mut self, _: &ZoomOut, window: &mut Window, cx: &mut Context<Self>) {
+    let viewport = window.viewport_size();
+    let center = point2(
+      f32::from(viewport.width) * 0.5,
+      f32::from(viewport.height) * 0.5,
+    );
+    self.set_zoom_around(self.camera.zoom / 1.15, center, window, cx);
+  }
+
+  fn reset_zoom(&mut self, _: &ResetZoom, window: &mut Window, cx: &mut Context<Self>) {
+    self.camera.reset();
+    window.set_rem_size(px(BASE_REM_SIZE));
+    cx.notify();
+  }
+
+  fn clear_selection(&mut self, _: &ClearSelection, _window: &mut Window, cx: &mut Context<Self>) {
+    let ended_drag = self.inspector.end_drag();
+    if self.selection.clear() || ended_drag {
+      cx.notify();
+    }
+  }
+
+  fn on_type_click(&mut self, id: TypeId, window: &mut Window, cx: &mut Context<Self>) {
+    window.focus(&self.focus_handle, cx);
+    self.selection.toggle_type(id, &self.edges);
+    cx.notify();
+  }
+
+  fn on_inspector_event(
+    &mut self,
+    event: InspectorEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    match event {
+      InspectorEvent::StartDrag(cursor) => {
+        window.focus(&self.focus_handle, cx);
+        let viewport = window.viewport_size();
+        self.selection.hovered_edge = None;
+        self
+          .inspector
+          .start_drag(cursor, f32::from(viewport.width), f32::from(viewport.height));
+      }
+      InspectorEvent::SelectType(id) => {
+        window.focus(&self.focus_handle, cx);
+        self.inspector.end_drag();
+        self.selection.select_type(id, &self.edges);
+      }
+      InspectorEvent::Close => {
+        self.inspector.end_drag();
+        self.selection.selected_edge = None;
+      }
+    }
+    cx.notify();
+  }
+
+  fn on_mouse_down(
+    &mut self,
+    event: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    window.focus(&self.focus_handle, cx);
+    let pos = point2(f32::from(event.position.x), f32::from(event.position.y));
+
+    if event.button == MouseButton::Left
+      && let Some(edge_id) = hit_test_edge(
+        &self.edges,
+        &self.type_anchors,
+        &self.directed_pairs,
+        self.camera.pan,
+        self.camera.zoom,
+        pos,
+      )
     {
-      file_node.collapsed = !file_node.collapsed;
-      self.relayout();
+      self.selection.toggle_edge(edge_id);
+      cx.notify();
+      return;
+    }
+
+    if event.button == MouseButton::Left || event.button == MouseButton::Middle {
+      self.selection.clear();
+      self.camera.drag_last_pos = Some(pos);
+      cx.notify();
     }
   }
 
-  fn relayout(&mut self) {
-    let layout = recompute_layout(&mut self.crates);
-    self.type_anchors = layout.type_anchors;
-    self.collapsed_targets = layout.collapsed_targets;
-    self.selection.hovered_edge = None;
+  fn on_mouse_move(
+    &mut self,
+    event: &MouseMoveEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let current = point2(f32::from(event.position.x), f32::from(event.position.y));
+
+    if self.inspector.is_dragging() {
+      let viewport = window.viewport_size();
+      if self.inspector.update_drag(
+        current,
+        f32::from(viewport.width),
+        f32::from(viewport.height),
+      ) {
+        cx.notify();
+      }
+      return;
+    }
+
+    if let Some(last) = self.camera.drag_last_pos {
+      self.camera.pan.x += current.x - last.x;
+      self.camera.pan.y += current.y - last.y;
+      self.camera.drag_last_pos = Some(current);
+      cx.notify();
+    } else {
+      let hovered = hit_test_edge(
+        &self.edges,
+        &self.type_anchors,
+        &self.directed_pairs,
+        self.camera.pan,
+        self.camera.zoom,
+        current,
+      );
+      if hovered != self.selection.hovered_edge {
+        self.selection.hovered_edge = hovered;
+        cx.notify();
+      }
+    }
   }
 
-  pub(crate) fn relative_display_path(&self, path: &Path) -> String {
-    path
-      .strip_prefix(&self.canonical_root)
-      .unwrap_or(path)
-      .display()
-      .to_string()
+  fn on_mouse_up(&mut self, _event: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    let inspector_ended = self.inspector.end_drag();
+    let camera_ended = self.camera.drag_last_pos.take().is_some();
+    if inspector_ended || camera_ended {
+      cx.notify();
+    }
+  }
+
+  fn on_scroll(&mut self, event: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+    let delta: Point<Pixels> = event.delta.pixel_delta(px(20.0));
+    let dx = f32::from(delta.x);
+    let dy = f32::from(delta.y);
+
+    if event.modifiers.platform || event.modifiers.control {
+      let factor = (1.0 + dy * 0.004).clamp(0.75, 1.25);
+      let cursor = point2(f32::from(event.position.x), f32::from(event.position.y));
+      self.set_zoom_around(self.camera.zoom * factor, cursor, window, cx);
+    } else {
+      self.camera.pan.x += dx;
+      self.camera.pan.y += dy;
+      cx.notify();
+    }
   }
 }
 
@@ -206,9 +278,34 @@ impl Render for Application {
     let is_hovering_edge = self.selection.hovered_edge.is_some();
 
     let dot_grid = ui::background::render_dot_grid(self.camera);
-    let file_cards = self.render_visible_file_cards(viewport_rect, cx);
-    let edges_layer = self.render_edges_layer(viewport_rect);
-    let inspector_panel = self.render_inspector_panel(viewport, cx);
+    let file_cards = ui::file_card::render_visible_file_cards(
+      &self.nodes,
+      &self.edges,
+      self.camera,
+      &self.selection,
+      viewport_rect,
+      cx,
+      Self::on_type_click,
+    );
+    let edges_layer = ui::edges::render_edges_layer(
+      &self.edges,
+      &self.type_anchors,
+      &self.directed_pairs,
+      self.camera,
+      &self.selection,
+      viewport_rect,
+    );
+    let inspector_panel = ui::inspector::render_inspector_panel(
+      &self.canonical_root,
+      &self.types,
+      &self.functions,
+      &self.edges,
+      &self.selection,
+      &self.inspector,
+      viewport,
+      cx,
+      Self::on_inspector_event,
+    );
     let lsp_status_badge = ui::hud::render_lsp_status(&self.lsp_status);
     let zoom_badge = ui::hud::render_zoom_badge(self.camera.zoom);
 
