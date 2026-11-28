@@ -344,7 +344,7 @@ pub fn build_crate_nodes(
         file_name: Arc::from(file_name),
         types: type_blocks,
         type_layouts,
-        collapsed: false,
+        collapsed: true,
         offset_rem: 0.0,
         offset_px: 0.0,
         height_rem: 0.0,
@@ -376,7 +376,7 @@ pub fn build_crate_nodes(
       rel_dir: Arc::from(rel_dir),
       files,
       total_type_count,
-      collapsed: false,
+      collapsed: true,
       position: point2(0.0, 0.0),
       height_rem: 0.0,
       fixed_border_px: 0.0,
@@ -718,46 +718,52 @@ mod tests {
     assert_eq!(crates[0].files[0].file_name.as_ref(), "a.rs");
     assert_eq!(crates[1].name.as_ref(), "beta");
 
-    let initial_beta_y = crates[1].position.y;
-    assert!(initial.collapsed_targets.is_empty());
-    assert_ne!(
+    // All crates and files start collapsed by default.
+    assert!(crates.iter().all(|c| c.collapsed));
+    assert!(crates.iter().all(|c| c.files.iter().all(|f| f.collapsed)));
+    assert_eq!(
       initial.type_anchors.get(&TypeId(0)),
-      initial.type_anchors.get(&TypeId(1))
-    );
-
-    // Collapsing the first file shifts beta up and merges anchors for types in that file.
-    crates[0].files[0].collapsed = true;
-    let after_file_collapse = recompute_layout(&mut crates);
-    assert!(crates[1].position.y < initial_beta_y);
-    assert_eq!(
-      after_file_collapse.type_anchors.get(&TypeId(0)),
-      after_file_collapse.type_anchors.get(&TypeId(1))
+      initial.type_anchors.get(&TypeId(2))
     );
     assert_eq!(
-      after_file_collapse.collapsed_targets.get(&TypeId(0)),
-      Some(&CollapsedTarget::File(0, 0))
-    );
-    assert_eq!(after_file_collapse.collapsed_targets.get(&TypeId(2)), None);
-
-    // Collapsing the entire alpha crate shifts beta up further and merges all alpha anchors at x=0.
-    let beta_y_after_file = crates[1].position.y;
-    crates[0].collapsed = true;
-    let after_crate_collapse = recompute_layout(&mut crates);
-    assert!(crates[1].position.y < beta_y_after_file);
-    assert_eq!(
-      after_crate_collapse.type_anchors.get(&TypeId(0)),
-      after_crate_collapse.type_anchors.get(&TypeId(2))
-    );
-    assert_eq!(
-      after_crate_collapse
-        .type_anchors
-        .get(&TypeId(0))
-        .map(|p| p.x),
+      initial.type_anchors.get(&TypeId(0)).map(|p| p.x),
       Some(0.0)
     );
     assert_eq!(
-      after_crate_collapse.collapsed_targets.get(&TypeId(2)),
+      initial.collapsed_targets.get(&TypeId(2)),
       Some(&CollapsedTarget::Crate(0))
+    );
+
+    // Expanding crate 0 while its files remain collapsed shifts beta down and targets each file.
+    let collapsed_crate_beta_y = crates[1].position.y;
+    crates[0].collapsed = false;
+    let after_crate_expand = recompute_layout(&mut crates);
+    assert!(crates[1].position.y > collapsed_crate_beta_y);
+    assert_eq!(
+      after_crate_expand.type_anchors.get(&TypeId(0)),
+      after_crate_expand.type_anchors.get(&TypeId(1))
+    );
+    assert_eq!(
+      after_crate_expand.collapsed_targets.get(&TypeId(0)),
+      Some(&CollapsedTarget::File(0, 0))
+    );
+    assert_eq!(
+      after_crate_expand.collapsed_targets.get(&TypeId(2)),
+      Some(&CollapsedTarget::File(0, 1))
+    );
+
+    // Expanding all files in crate 0 shifts beta down further and separates type anchors.
+    let beta_y_with_collapsed_files = crates[1].position.y;
+    for file in &mut crates[0].files {
+      file.collapsed = false;
+    }
+    let after_files_expand = recompute_layout(&mut crates);
+    assert!(crates[1].position.y > beta_y_with_collapsed_files);
+    assert_eq!(after_files_expand.collapsed_targets.get(&TypeId(0)), None);
+    assert_eq!(after_files_expand.collapsed_targets.get(&TypeId(2)), None);
+    assert_ne!(
+      after_files_expand.type_anchors.get(&TypeId(0)),
+      after_files_expand.type_anchors.get(&TypeId(1))
     );
   }
 }
