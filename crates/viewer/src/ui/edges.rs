@@ -88,55 +88,51 @@ impl EdgeBatch {
 }
 
 impl Application {
-  pub(crate) fn compute_edge_curves(
+  pub(crate) fn iter_edge_curves(
     &self,
     origin: Point<f32>,
     cull_rect: Option<(ViewportRect, f32)>,
-  ) -> Vec<EdgeCurve> {
+  ) -> impl Iterator<Item = EdgeCurve> + '_ {
     let zoom = self.camera.zoom;
     let pan = self.camera.pan;
     let arrow_len = (7.0 * zoom).clamp(4.0, 12.0);
 
-    self
-      .edges
-      .iter()
-      .filter_map(|edge| {
-        let from = *self.type_anchors.get(&edge.from)?;
-        let to = *self.type_anchors.get(&edge.to)?;
+    self.edges.iter().filter_map(move |edge| {
+      let from = *self.type_anchors.get(&edge.from)?;
+      let to = *self.type_anchors.get(&edge.to)?;
 
-        let from_x = origin.x + from.x * zoom + pan.x;
-        let from_y = origin.y + from.y * zoom + pan.y;
-        let to_x = origin.x + to.x * zoom + pan.x;
-        let to_y = origin.y + to.y * zoom + pan.y;
+      let from_x = origin.x + from.x * zoom + pan.x;
+      let from_y = origin.y + from.y * zoom + pan.y;
+      let to_x = origin.x + to.x * zoom + pan.x;
+      let to_y = origin.y + to.y * zoom + pan.y;
 
-        let dy = (to_y - from_y).abs();
-        let bidirectional_offset =
-          if self.directed_pairs.contains(&(edge.to, edge.from)) && edge.from > edge.to {
-            34.0 * zoom
-          } else {
-            0.0
-          };
-        let arc = (54.0 * zoom + dy * 0.30 + bidirectional_offset).clamp(54.0 * zoom, 460.0 * zoom);
-
-        let curve = EdgeCurve {
-          edge_id: edge.id,
-          p0: point(from_x, from_y),
-          c1: point(from_x - arc, from_y),
-          c2: point(to_x - arc, to_y),
-          p3: point(to_x - arrow_len * 0.5, to_y),
-          arrow_tip: point(to_x, to_y),
+      let dy = (to_y - from_y).abs();
+      let bidirectional_offset =
+        if self.directed_pairs.contains(&(edge.to, edge.from)) && edge.from > edge.to {
+          34.0 * zoom
+        } else {
+          0.0
         };
+      let arc = (54.0 * zoom + dy * 0.30 + bidirectional_offset).clamp(54.0 * zoom, 460.0 * zoom);
 
-        if let Some((rect, padding)) = cull_rect {
-          let (min_x, min_y, max_x, max_y) = curve.aabb(padding);
-          if !rect.intersects(min_x, min_y, max_x, max_y) {
-            return None;
-          }
+      let curve = EdgeCurve {
+        edge_id: edge.id,
+        p0: point(from_x, from_y),
+        c1: point(from_x - arc, from_y),
+        c2: point(to_x - arc, to_y),
+        p3: point(to_x - arrow_len * 0.5, to_y),
+        arrow_tip: point(to_x, to_y),
+      };
+
+      if let Some((rect, padding)) = cull_rect {
+        let (min_x, min_y, max_x, max_y) = curve.aabb(padding);
+        if !rect.intersects(min_x, min_y, max_x, max_y) {
+          return None;
         }
+      }
 
-        Some(curve)
-      })
-      .collect()
+      Some(curve)
+    })
   }
 
   pub(crate) fn hit_test_edge(&self, screen_pos: Point<f32>) -> Option<EdgeId> {
@@ -147,11 +143,10 @@ impl Application {
       max_x: screen_pos.x,
       max_y: screen_pos.y,
     };
-    let curves = self.compute_edge_curves(point(0.0, 0.0), Some((cursor_rect, threshold)));
     let threshold_sq = threshold * threshold;
 
     let mut best: Option<(EdgeId, f32)> = None;
-    for curve in &curves {
+    for curve in self.iter_edge_curves(point(0.0, 0.0), Some((cursor_rect, threshold))) {
       let dist_sq = min_dist_sq_to_cubic_bezier(
         screen_pos,
         curve.p0,
@@ -175,10 +170,8 @@ impl Application {
     let hovered_edge_id = self.selection.hovered_edge;
 
     let edge_cull_padding = EDGE_CULL_PADDING_PX * zoom.max(1.0);
-    let edge_curves =
-      self.compute_edge_curves(point(0.0, 0.0), Some((viewport_rect, edge_cull_padding)));
-    let styled_curves: Vec<(EdgeCurve, EdgeHighlight)> = edge_curves
-      .into_iter()
+    let styled_curves: Vec<(EdgeCurve, EdgeHighlight)> = self
+      .iter_edge_curves(point(0.0, 0.0), Some((viewport_rect, edge_cull_padding)))
       .filter_map(|curve| {
         let edge = self.edges.get(curve.edge_id.0)?;
         let highlight = if selected_edge_id == Some(edge.id) {

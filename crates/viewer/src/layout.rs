@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
-use gpui::{Point, point};
+use gpui::{Point, SharedString, point};
 use graph::{TypeId, TypeNode};
 
 use crate::theme::{
@@ -30,10 +30,17 @@ impl TypeLayout {
   }
 }
 
+pub struct TypeBlock {
+  pub id: TypeId,
+  pub header_line: SharedString,
+  pub rest_body: Option<SharedString>,
+  pub rest_line_count: usize,
+}
+
 pub struct FileNode {
-  pub dir_prefix: String,
-  pub file_name: String,
-  pub types: Vec<TypeNode>,
+  pub dir_prefix: SharedString,
+  pub file_name: SharedString,
+  pub types: Vec<TypeBlock>,
   pub type_layouts: Vec<TypeLayout>,
   pub position: Point<f32>,
   /// Total height of the card split into rem-scaled and fixed-px (border) components.
@@ -44,6 +51,45 @@ pub struct FileNode {
   pub body_content_px: f32,
   /// Stable minimum width in rems so culling wide off-screen types doesn't cause horizontal jitter.
   pub min_width_rem: f32,
+}
+
+/// Splits a type body into its first line (header) and remaining lines (rest_body),
+/// returning `(header_line, rest_body, total_line_count, max_line_chars)`.
+fn split_type_body(body: &str) -> (SharedString, Option<SharedString>, usize, usize) {
+  let mut lines = body.lines();
+  let Some(first) = lines.next() else {
+    return (SharedString::from(" "), None, 1, 0);
+  };
+
+  let mut max_chars = first.chars().count();
+  let header_line = if first.is_empty() {
+    SharedString::from(" ")
+  } else {
+    SharedString::from(first.to_owned())
+  };
+
+  let mut rest = String::new();
+  let mut rest_count: usize = 0;
+  for line in lines {
+    if rest_count > 0 {
+      rest.push('\n');
+    }
+    max_chars = max_chars.max(line.chars().count());
+    if line.is_empty() {
+      rest.push(' ');
+    } else {
+      rest.push_str(line);
+    }
+    rest_count += 1;
+  }
+
+  let rest_body = if rest_count > 0 {
+    Some(SharedString::from(rest))
+  } else {
+    None
+  };
+
+  (header_line, rest_body, 1 + rest_count, max_chars)
 }
 
 impl FileNode {
@@ -85,22 +131,27 @@ pub fn build_file_nodes(
 
   for (file_path, file_types) in grouped {
     let mut local_y = header_height + body_padding_y;
+    let mut type_blocks = Vec::with_capacity(file_types.len());
     let mut type_layouts = Vec::with_capacity(file_types.len());
     let mut offset_rem: f32 = 0.0;
     let mut offset_px: f32 = 0.0;
     let mut max_body_line_chars: usize = 0;
 
     for (idx, type_node) in file_types.iter().enumerate() {
-      let mut line_count: usize = 0;
-      for line in type_node.body.lines() {
-        line_count += 1;
-        max_body_line_chars = max_body_line_chars.max(line.chars().count());
-      }
-      let lines = line_count.max(1) as f32;
+      let (header_line, rest_body, line_count, type_max_chars) = split_type_body(&type_node.body);
+      max_body_line_chars = max_body_line_chars.max(type_max_chars);
+
+      let lines = line_count as f32;
       let block_height_rem = TYPE_BLOCK_PAD_Y_REM * 2.0 + lines * TYPE_LINE_HEIGHT_REM;
       let block_border_px = 2.0;
       let block_height = type_block_pad_y * 2.0 + lines * type_line_height + block_border_px;
 
+      type_blocks.push(TypeBlock {
+        id: type_node.id,
+        header_line,
+        rest_body,
+        rest_line_count: line_count - 1,
+      });
       type_layouts.push(TypeLayout {
         offset_rem,
         offset_px,
@@ -147,9 +198,9 @@ pub fn build_file_nodes(
     let fixed_border_px = 2.0 + body_content_px + bottom_border;
     let card_height = local_y + body_padding_y + bottom_border;
     nodes.push(FileNode {
-      dir_prefix,
-      file_name,
-      types: file_types,
+      dir_prefix: SharedString::from(dir_prefix),
+      file_name: SharedString::from(file_name),
+      types: type_blocks,
       type_layouts,
       position: point(0.0, cursor_y),
       height_rem,
@@ -220,6 +271,27 @@ pub fn visible_type_slice(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn split_type_body_handles_empty_single_and_multiline() {
+    let (h, r, lines, max_c) = split_type_body("");
+    assert_eq!(h.as_ref(), " ");
+    assert!(r.is_none());
+    assert_eq!(lines, 1);
+    assert_eq!(max_c, 0);
+
+    let (h, r, lines, max_c) = split_type_body("pub struct Unit;");
+    assert_eq!(h.as_ref(), "pub struct Unit;");
+    assert!(r.is_none());
+    assert_eq!(lines, 1);
+    assert_eq!(max_c, 16);
+
+    let (h, r, lines, max_c) = split_type_body("pub struct Pair {\n  a: u32,\n\n  b: String,\n}");
+    assert_eq!(h.as_ref(), "pub struct Pair {");
+    assert_eq!(r.as_deref(), Some("  a: u32,\n \n  b: String,\n}"));
+    assert_eq!(lines, 5);
+    assert_eq!(max_c, 17);
+  }
 
   #[test]
   fn visible_type_slice_preserves_total_body_height_across_zooms() {

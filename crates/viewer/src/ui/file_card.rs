@@ -1,10 +1,7 @@
-use std::collections::HashSet;
-
 use gpui::{
   AnyElement, BoxShadow, Context, FontWeight, MouseButton, div, point, prelude::*, px, rems, rgb,
   rgba,
 };
-use graph::TypeId;
 
 use crate::app::Application;
 use crate::geometry::ViewportRect;
@@ -31,23 +28,7 @@ impl Application {
       .and_then(|id| self.edges.get(id.0));
     let selected_edge_from = selected_edge_ref.map(|e| e.from);
     let selected_edge_to = selected_edge_ref.map(|e| e.to);
-
-    let connected_types: HashSet<TypeId> = match selected_type {
-      Some(sel) => self
-        .edges
-        .iter()
-        .filter_map(|edge| {
-          if edge.from == sel {
-            Some(edge.to)
-          } else if edge.to == sel {
-            Some(edge.from)
-          } else {
-            None
-          }
-        })
-        .collect(),
-      None => HashSet::new(),
-    };
+    let connected_types = &self.selection.connected_types;
 
     let first_visible_node = self.nodes.partition_point(|node| {
       let screen_y = node.position.y * zoom + pan.y;
@@ -138,8 +119,8 @@ impl Application {
               .when(top_spacer_px > 0.0, |el| {
                 el.child(div().h(px(top_spacer_px)))
               })
-              .children(node.types[visible_types].iter().map(|type_node| {
-                let id = type_node.id;
+              .children(node.types[visible_types].iter().map(|type_block| {
+                let id = type_block.id;
                 let is_selected = selected_type == Some(id);
                 let is_edge_from = selected_edge_from == Some(id);
                 let is_edge_to = selected_edge_to == Some(id);
@@ -156,18 +137,6 @@ impl Application {
                 } else {
                   (rgba(0xffffff04), rgba(0xffffff0d))
                 };
-
-                let body_lines: Vec<String> = type_node
-                  .body
-                  .lines()
-                  .map(|line| {
-                    if line.is_empty() {
-                      " ".to_owned()
-                    } else {
-                      line.to_owned()
-                    }
-                  })
-                  .collect();
 
                 div()
                   .id(("type", id.0))
@@ -186,24 +155,30 @@ impl Application {
                     cx.listener(move |this, _, window, cx| {
                       cx.stop_propagation();
                       window.focus(&this.focus_handle, cx);
-                      this.selection.toggle_type(id);
+                      this.selection.toggle_type(id, &this.edges);
                       cx.notify();
                     }),
                   )
                   .flex()
                   .flex_col()
-                  .children(body_lines.into_iter().enumerate().map(|(line_idx, line)| {
-                    let color = if line_idx == 0 {
-                      rgb(0x7dd3fc)
-                    } else {
-                      rgb(0xd1d5db)
-                    };
+                  .child(
                     div()
                       .h(rems(TYPE_LINE_HEIGHT_REM))
                       .line_height(rems(TYPE_LINE_HEIGHT_REM))
-                      .text_color(color)
-                      .child(line)
-                  }))
+                      .text_color(rgb(0x7dd3fc))
+                      .child(type_block.header_line.clone()),
+                  )
+                  .when_some(type_block.rest_body.as_ref(), |el, rest| {
+                    el.child(
+                      div()
+                        .h(rems(
+                          TYPE_LINE_HEIGHT_REM * type_block.rest_line_count as f32,
+                        ))
+                        .line_height(rems(TYPE_LINE_HEIGHT_REM))
+                        .text_color(rgb(0xd1d5db))
+                        .child(rest.clone()),
+                    )
+                  })
               }))
               .when(bottom_spacer_px > 0.0, |el| {
                 el.child(div().h(px(bottom_spacer_px)))

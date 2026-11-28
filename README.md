@@ -1,3 +1,7 @@
+# Type Viewer
+
+Type Viewer is an application that lets you see your types and how they relate to each other.
+
 ## Developing on Mac
 
 GPUI compiles Metal shaders at build time using Xcode's Metal Toolchain. To set it up:

@@ -126,7 +126,7 @@ impl Application {
                       cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus_handle, cx);
-                        this.selection.select_type(tid);
+                        this.selection.select_type(tid, &this.edges);
                         cx.notify();
                       }),
                     )
@@ -165,7 +165,7 @@ impl Application {
                       cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus_handle, cx);
-                        this.selection.select_type(tid);
+                        this.selection.select_type(tid, &this.edges);
                         cx.notify();
                       }),
                     )
@@ -243,7 +243,7 @@ impl Application {
                       cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus_handle, cx);
-                        this.selection.select_type(from_id);
+                        this.selection.select_type(from_id, &this.edges);
                         cx.notify();
                       }),
                     )
@@ -271,7 +271,7 @@ impl Application {
                       cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus_handle, cx);
-                        this.selection.select_type(to_id);
+                        this.selection.select_type(to_id, &this.edges);
                         cx.notify();
                       }),
                     )

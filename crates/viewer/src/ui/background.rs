@@ -10,7 +10,7 @@ pub fn render_dot_grid(camera: Camera) -> impl IntoElement {
     |_bounds, _window, _cx| {},
     move |bounds, _, window, _cx| {
       let mut step = 32.0 * zoom;
-      while step < 14.0 {
+      while step < 24.0 {
         step *= 2.0;
       }
       let dot_size = (2.0 * zoom).clamp(1.0, 3.0);
