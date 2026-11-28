@@ -18,18 +18,13 @@ use crate::protocol::{
   IncomingMessage, OutgoingNotification, OutgoingRequest, OutgoingResponse, RequestId,
   read_message, write_message,
 };
-use crate::types::{
-  CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol,
-  DocumentSymbolResponse, GotoDefinitionResponse, Hover, InitializeResult, Location, Position,
-  ServerStatus, SymbolInformation,
-};
+use crate::types::{GotoDefinitionResponse, Location, Position, ServerStatusNotification};
 
 type PendingMap = HashMap<u64, mpsc::Sender<Result<Value>>>;
 
 #[derive(Debug)]
 struct ReadyState {
   quiescent: Option<bool>,
-  server_status: Option<ServerStatus>,
   active_progress: HashSet<String>,
   saw_progress: bool,
   last_activity: Instant,
@@ -40,7 +35,6 @@ impl ReadyState {
   fn new() -> Self {
     Self {
       quiescent: None,
-      server_status: None,
       active_progress: HashSet::new(),
       saw_progress: false,
       last_activity: Instant::now(),
@@ -58,7 +52,6 @@ pub struct LspClient {
   ready: Arc<(Mutex<ReadyState>, Condvar)>,
   next_id: AtomicU64,
   shut_down: AtomicBool,
-  initialize_result: InitializeResult,
   reader_thread: Option<JoinHandle<()>>,
 }
 
@@ -112,17 +105,13 @@ impl LspClient {
         );
       })?;
 
-    let mut client = Self {
+    let client = Self {
       child: Mutex::new(child),
       writer,
       pending,
       ready,
       next_id: AtomicU64::new(1),
       shut_down: AtomicBool::new(false),
-      initialize_result: InitializeResult {
-        capabilities: Value::Null,
-        server_info: None,
-      },
       reader_thread: Some(reader_thread),
     };
 
@@ -143,22 +132,8 @@ impl LspClient {
           "workDoneProgress": true,
         },
         "textDocument": {
-          "hover": {
-            "contentFormat": ["markdown", "plaintext"],
-          },
-          "definition": {
-            "linkSupport": true,
-          },
-          "typeDefinition": {
-            "linkSupport": true,
-          },
-          "implementation": {
-            "linkSupport": true,
-          },
-          "documentSymbol": {
-            "hierarchicalDocumentSymbolSupport": true,
-          },
-          "callHierarchy": {},
+          "definition": { "linkSupport": true },
+          "typeDefinition": { "linkSupport": true },
         },
         "experimental": {
           "serverStatusNotification": true,
@@ -166,22 +141,10 @@ impl LspClient {
       },
     });
 
-    client.initialize_result = client.request("initialize", init_params)?;
+    let _: Value = client.request("initialize", init_params)?;
     client.notify("initialized", json!({}))?;
 
     Ok(client)
-  }
-
-  /// Returns the `InitializeResult` returned by the server during startup.
-  pub fn initialize_result(&self) -> &InitializeResult {
-    &self.initialize_result
-  }
-
-  /// Returns the latest `experimental/serverStatus` reported by `rust-analyzer`,
-  /// if any has been received.
-  pub fn server_status(&self) -> Option<ServerStatus> {
-    let (lock, _) = &*self.ready;
-    lock.lock().ok().and_then(|s| s.server_status.clone())
   }
 
   /// Blocks until the language server finishes initial indexing (e.g.
@@ -254,19 +217,6 @@ impl LspClient {
     Ok(uri)
   }
 
-  /// Sends `textDocument/didClose` for the given file.
-  pub fn did_close(&self, path: impl AsRef<Path>) -> Result<()> {
-    let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    self.notify(
-      "textDocument/didClose",
-      json!({
-        "textDocument": {
-          "uri": uri.as_str(),
-        }
-      }),
-    )
-  }
-
   /// Sends `textDocument/definition` and normalizes the response to `Vec<Location>`.
   pub fn definition(&self, path: impl AsRef<Path>, position: Position) -> Result<Vec<Location>> {
     self.goto_request("textDocument/definition", path, position)
@@ -279,101 +229,6 @@ impl LspClient {
     position: Position,
   ) -> Result<Vec<Location>> {
     self.goto_request("textDocument/typeDefinition", path, position)
-  }
-
-  /// Sends `textDocument/implementation` and normalizes the response to `Vec<Location>`.
-  pub fn implementation(
-    &self,
-    path: impl AsRef<Path>,
-    position: Position,
-  ) -> Result<Vec<Location>> {
-    self.goto_request("textDocument/implementation", path, position)
-  }
-
-  /// Sends `textDocument/references`.
-  pub fn references(
-    &self,
-    path: impl AsRef<Path>,
-    position: Position,
-    include_declaration: bool,
-  ) -> Result<Vec<Location>> {
-    let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    let result: Option<Vec<Location>> = self.request(
-      "textDocument/references",
-      json!({
-        "textDocument": { "uri": uri.as_str() },
-        "position": position,
-        "context": { "includeDeclaration": include_declaration },
-      }),
-    )?;
-    Ok(result.unwrap_or_default())
-  }
-
-  /// Sends `textDocument/hover`.
-  pub fn hover(&self, path: impl AsRef<Path>, position: Position) -> Result<Option<Hover>> {
-    let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    self.request(
-      "textDocument/hover",
-      json!({
-        "textDocument": { "uri": uri.as_str() },
-        "position": position,
-      }),
-    )
-  }
-
-  /// Sends `textDocument/documentSymbol` and normalizes hierarchical or flat
-  /// responses into `Vec<DocumentSymbol>`.
-  pub fn document_symbols(&self, path: impl AsRef<Path>) -> Result<Vec<DocumentSymbol>> {
-    let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    let response: Option<DocumentSymbolResponse> = self.request(
-      "textDocument/documentSymbol",
-      json!({
-        "textDocument": { "uri": uri.as_str() },
-      }),
-    )?;
-    Ok(
-      response
-        .map(DocumentSymbolResponse::into_document_symbols)
-        .unwrap_or_default(),
-    )
-  }
-
-  /// Sends `workspace/symbol` with a search query string.
-  pub fn workspace_symbols(&self, query: &str) -> Result<Vec<SymbolInformation>> {
-    let response: Option<Vec<SymbolInformation>> =
-      self.request("workspace/symbol", json!({ "query": query }))?;
-    Ok(response.unwrap_or_default())
-  }
-
-  /// Sends `textDocument/prepareCallHierarchy`.
-  pub fn prepare_call_hierarchy(
-    &self,
-    path: impl AsRef<Path>,
-    position: Position,
-  ) -> Result<Vec<CallHierarchyItem>> {
-    let uri = path_to_uri(&canonicalize_or_keep(path.as_ref()))?;
-    let response: Option<Vec<CallHierarchyItem>> = self.request(
-      "textDocument/prepareCallHierarchy",
-      json!({
-        "textDocument": { "uri": uri.as_str() },
-        "position": position,
-      }),
-    )?;
-    Ok(response.unwrap_or_default())
-  }
-
-  /// Sends `callHierarchy/incomingCalls` for an item returned by `prepare_call_hierarchy`.
-  pub fn incoming_calls(&self, item: &CallHierarchyItem) -> Result<Vec<CallHierarchyIncomingCall>> {
-    let response: Option<Vec<CallHierarchyIncomingCall>> =
-      self.request("callHierarchy/incomingCalls", json!({ "item": item }))?;
-    Ok(response.unwrap_or_default())
-  }
-
-  /// Sends `callHierarchy/outgoingCalls` for an item returned by `prepare_call_hierarchy`.
-  pub fn outgoing_calls(&self, item: &CallHierarchyItem) -> Result<Vec<CallHierarchyOutgoingCall>> {
-    let response: Option<Vec<CallHierarchyOutgoingCall>> =
-      self.request("callHierarchy/outgoingCalls", json!({ "item": item }))?;
-    Ok(response.unwrap_or_default())
   }
 
   /// Sends an arbitrary LSP request and deserializes the JSON result.
@@ -564,11 +419,10 @@ fn handle_notification(method: &str, params: &Value, ready: &(Mutex<ReadyState>,
   let (lock, cvar) = ready;
   match method {
     "experimental/serverStatus" => {
-      if let Ok(status) = serde_json::from_value::<ServerStatus>(params.clone())
+      if let Ok(status) = serde_json::from_value::<ServerStatusNotification>(params.clone())
         && let Ok(mut state) = lock.lock()
       {
         state.quiescent = Some(status.quiescent);
-        state.server_status = Some(status);
         state.last_activity = Instant::now();
         cvar.notify_all();
       }

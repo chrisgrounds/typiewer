@@ -418,14 +418,13 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 name = "bin"
 version = "0.1.0"
 dependencies = [
- "command_palette",
- "finder",
  "gpui",
  "gpui_platform",
  "graph",
  "layout",
  "lsp",
  "macros",
+ "palette",
  "state",
  "ui",
 ]
@@ -685,14 +684,6 @@ name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
-
-[[package]]
-name = "command_palette"
-version = "0.1.0"
-dependencies = [
- "finder",
- "gpui",
-]
 
 [[package]]
 name = "concurrent-queue"
@@ -1191,15 +1182,6 @@ name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
-
-[[package]]
-name = "finder"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "graph",
- "lsp",
-]
 
 [[package]]
 name = "flate2"
@@ -3215,6 +3197,13 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "palette"
+version = "0.1.0"
+dependencies = [
+ "gpui",
 ]
 
 [[package]]

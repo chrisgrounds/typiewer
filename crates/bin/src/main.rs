@@ -1,11 +1,11 @@
 mod app;
+mod palettes;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use graph::{Graph, parse_workspace};
-use lsp::LspClient;
+use graph::{Graph, TypeRef, parse_workspace, resolve_with_rust_analyzer};
 use macros::performance;
 
 fn dump_graph(graph: &Graph) {
@@ -23,16 +23,16 @@ fn dump_graph(graph: &Graph) {
   }
   println!("\n=== FUNCTION EDGES ({}) ===", graph.edges.len());
   for edge in &graph.edges {
-    let Some(from) = graph.types.get(edge.from.0) else {
+    let Some(from) = graph.ty(edge.from) else {
       continue;
     };
-    let Some(to) = graph.types.get(edge.to.0) else {
+    let Some(to) = graph.ty(edge.to) else {
       continue;
     };
     let fn_names: Vec<&str> = edge
       .functions
       .iter()
-      .filter_map(|fid| graph.functions.get(fid.0).map(|f| f.name.as_str()))
+      .filter_map(|&fid| graph.func(fid).map(|f| f.name.as_str()))
       .collect();
     println!(
       "  {} ({}) -> {} ({})  via [{}]",
@@ -73,40 +73,22 @@ fn main() {
     }
   };
 
+  let mut graph = Graph::from_parsed(parsed.types, parsed.functions);
+
   if std::env::args().any(|arg| arg == "--dump") {
-    let graph = match LspClient::start_rust_analyzer(root) {
-      Ok(lsp) => {
-        let _ = performance!(
-          lsp.wait_until_ready(Duration::from_secs(60)),
-          "lsp: wait_until_ready"
-        );
-        let graph = match performance!(
-          Graph::new(parsed.types, parsed.functions, &lsp),
-          "lsp: Graph::new"
-        ) {
-          Ok(graph) => graph,
-          Err(err) => {
-            eprintln!("Failed to build graph via LSP: {err}");
-            Graph {
-              types: Vec::new(),
-              functions: Vec::new(),
-              edges: Vec::new(),
-            }
-          }
-        };
-        let _ = lsp.shutdown();
-        graph
-      }
-      Err(err) => {
-        eprintln!("Failed to start rust-analyzer: {err}");
-        Graph::from_parsed(parsed.types, parsed.functions)
-      }
-    };
+    let type_refs: Vec<TypeRef> = graph.type_refs();
+    let functions = std::mem::take(&mut graph.functions);
+    match performance!(
+      resolve_with_rust_analyzer(Path::new(root), &type_refs, functions, Duration::from_secs(60)),
+      "lsp: resolve_with_rust_analyzer"
+    ) {
+      Ok(resolution) => graph.apply_resolution(resolution),
+      Err(err) => eprintln!("Failed to resolve graph via LSP: {err}"),
+    }
 
     dump_graph(&graph);
     return;
   }
 
-  let graph = Graph::from_parsed(parsed.types, parsed.functions);
   app::run(PathBuf::from(root), graph);
 }

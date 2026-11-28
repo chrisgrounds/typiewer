@@ -1,11 +1,30 @@
 pub mod camera;
 pub mod inspector;
-pub mod lsp_status;
 pub mod selection;
-pub mod settings;
 
 pub use camera::Camera;
 pub use inspector::{INSPECTOR_WIDTH, InspectorState};
-pub use lsp_status::LspStatus;
 pub use selection::Selection;
-pub use settings::ViewerSettings;
+
+pub enum LspStatus {
+  Initialising,
+  Ready,
+  Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ViewerSettings {
+  pub show_dot_grid: bool,
+  pub show_edges: bool,
+  pub show_zoom_badge: bool,
+}
+
+impl Default for ViewerSettings {
+  fn default() -> Self {
+    Self {
+      show_dot_grid: true,
+      show_edges: true,
+      show_zoom_badge: true,
+    }
+  }
+}

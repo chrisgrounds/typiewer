@@ -5,8 +5,4 @@ mod types;
 
 pub use client::LspClient;
 pub use error::{LspError, Result};
-pub use types::{
-  CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentSymbol, Hover,
-  HoverContents, InitializeResult, Location, LocationLink, MarkedString, MarkupContent, Position,
-  Range, ServerHealth, ServerStatus, SymbolInformation, SymbolKind,
-};
+pub use types::{Location, LocationLink, Position, Range};

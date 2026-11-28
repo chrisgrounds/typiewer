@@ -1,10 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use graph::{TypeId, TypeNode};
+use graph::{EdgeId, Graph, TypeId, TypeNode};
 
-use crate::geometry::{Point2, point2};
+use crate::edges;
+use crate::geometry::{EdgeCurve, Point2, Rect, RemPx, VerticalSpan, point2};
 use crate::metrics::{
   BASE_REM_SIZE, BODY_CHAR_WIDTH_REM, BODY_PAD_Y_REM, CARD_BODY_HORIZONTAL_PAD_REM,
   CARD_HEADER_HORIZONTAL_PAD_REM, CARD_WIDTH_CULL_SAFETY_FACTOR, CRATE_BODY_PAD_X_REM,
@@ -19,47 +21,23 @@ pub enum CollapsedTarget {
   File(usize, usize),
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct TypeLayout {
-  /// Offset from the top of the card body's inner content area (excluding body top padding).
-  pub offset_rem: f32,
-  pub offset_px: f32,
-  pub height_rem: f32,
-  pub border_px: f32,
-}
-
-impl TypeLayout {
-  pub fn screen_top(&self, body_content_top_y: f32, rem_size: f32) -> f32 {
-    body_content_top_y + self.offset_rem * rem_size + self.offset_px
-  }
-
-  pub fn screen_height(&self, rem_size: f32) -> f32 {
-    self.height_rem * rem_size + self.border_px
-  }
-}
-
 pub struct TypeBlock {
   pub id: TypeId,
   pub header_line: Arc<str>,
   pub rest_body: Option<Arc<str>>,
   pub rest_line_count: usize,
+  pub span: VerticalSpan,
 }
 
 pub struct FileNode {
   pub dir_prefix: Arc<str>,
   pub file_name: Arc<str>,
   pub types: Vec<TypeBlock>,
-  pub type_layouts: Vec<TypeLayout>,
   pub collapsed: bool,
-  /// Offset from the top of the parent crate body's inner content area.
-  pub offset_rem: f32,
-  pub offset_px: f32,
-  /// Total height of the card in its current expanded/collapsed state.
-  pub height_rem: f32,
-  pub fixed_border_px: f32,
+  /// Vertical offset and total height within the parent crate's body content area.
+  pub span: VerticalSpan,
   /// Total height of the card body's inner content area (all type blocks + gaps).
-  pub body_content_rem: f32,
-  pub body_content_px: f32,
+  pub body_content: RemPx,
   /// Stable minimum width in rems so culling wide off-screen types doesn't cause horizontal jitter.
   pub min_width_rem: f32,
 }
@@ -72,48 +50,69 @@ pub struct CrateNode {
   pub collapsed: bool,
   pub position: Point2,
   /// Total height of the crate box in its current expanded/collapsed state.
-  pub height_rem: f32,
-  pub fixed_border_px: f32,
+  pub height: RemPx,
   /// Total height of the crate body's inner content area (all file cards + gaps).
-  pub body_content_rem: f32,
-  pub body_content_px: f32,
+  pub body_content: RemPx,
   /// Stable minimum width in rems covering the crate header and all contained file cards.
   pub min_width_rem: f32,
 }
 
+fn body_content_top(
+  card_top_y: f32,
+  header_height_rem: f32,
+  body_pad_y_rem: f32,
+  rem_size: f32,
+) -> f32 {
+  card_top_y + RemPx::new(header_height_rem + body_pad_y_rem, 2.0).to_px(rem_size)
+}
+
 impl FileNode {
   pub fn screen_top(&self, crate_body_content_top_y: f32, rem_size: f32) -> f32 {
-    crate_body_content_top_y + self.offset_rem * rem_size + self.offset_px
+    self.span.screen_top(crate_body_content_top_y, rem_size)
   }
 
   pub fn screen_height(&self, rem_size: f32) -> f32 {
-    self.height_rem * rem_size + self.fixed_border_px
+    self.span.screen_height(rem_size)
   }
 
   pub fn body_content_top_y(&self, card_screen_y: f32, rem_size: f32) -> f32 {
-    let header_and_top_border = (HEADER_PAD_Y_REM * 2.0 + HEADER_LINE_HEIGHT_REM) * rem_size + 2.0;
-    card_screen_y + header_and_top_border + BODY_PAD_Y_REM * rem_size
+    body_content_top(card_screen_y, Self::header_height_rem(), BODY_PAD_Y_REM, rem_size)
   }
 
-  fn header_height_rem() -> f32 {
+  pub fn visible_types(
+    &self,
+    body_content_top_y: f32,
+    rem_size: f32,
+    vp_y: (f32, f32),
+  ) -> (Range<usize>, f32, f32) {
+    visible_slice(
+      &self.types,
+      |ty| ty.span,
+      body_content_top_y,
+      self.body_content,
+      TYPE_GAP_REM,
+      rem_size,
+      vp_y,
+    )
+  }
+
+  const fn header_height_rem() -> f32 {
     HEADER_PAD_Y_REM * 2.0 + HEADER_LINE_HEIGHT_REM
   }
 
   fn recompute_dimensions(&mut self) {
     let header_rem = Self::header_height_rem();
-    if self.collapsed {
-      self.height_rem = header_rem;
-      self.fixed_border_px = 2.0;
+    self.span.height = if self.collapsed {
+      RemPx::new(header_rem, 2.0)
     } else {
-      self.height_rem = header_rem + BODY_PAD_Y_REM * 2.0 + self.body_content_rem;
-      self.fixed_border_px = 3.0 + self.body_content_px;
-    }
+      RemPx::new(header_rem + BODY_PAD_Y_REM * 2.0, 3.0) + self.body_content
+    };
   }
 }
 
 impl CrateNode {
   pub fn screen_height(&self, rem_size: f32) -> f32 {
-    self.height_rem * rem_size + self.fixed_border_px
+    self.height.to_px(rem_size)
   }
 
   pub fn estimated_cull_width(&self, rem_size: f32) -> f32 {
@@ -121,14 +120,393 @@ impl CrateNode {
   }
 
   pub fn body_content_top_y(&self, crate_screen_y: f32, rem_size: f32) -> f32 {
-    let header_and_top_border =
-      (CRATE_HEADER_PAD_Y_REM * 2.0 + CRATE_HEADER_LINE_HEIGHT_REM) * rem_size + 2.0;
-    crate_screen_y + header_and_top_border + CRATE_BODY_PAD_Y_REM * rem_size
+    body_content_top(
+      crate_screen_y,
+      Self::header_height_rem(),
+      CRATE_BODY_PAD_Y_REM,
+      rem_size,
+    )
   }
 
-  fn header_height_rem() -> f32 {
+  pub fn visible_files(
+    &self,
+    crate_body_content_top_y: f32,
+    rem_size: f32,
+    vp_y: (f32, f32),
+  ) -> (Range<usize>, f32, f32) {
+    visible_slice(
+      &self.files,
+      |file| file.span,
+      crate_body_content_top_y,
+      self.body_content,
+      FILE_GAP_REM,
+      rem_size,
+      vp_y,
+    )
+  }
+
+  const fn header_height_rem() -> f32 {
     CRATE_HEADER_PAD_Y_REM * 2.0 + CRATE_HEADER_LINE_HEIGHT_REM
   }
+}
+
+pub struct WorkspaceLayout {
+  pub crates: Vec<CrateNode>,
+  pub type_anchors: HashMap<TypeId, Point2>,
+  pub collapsed_targets: HashMap<TypeId, CollapsedTarget>,
+  type_locations: HashMap<TypeId, (usize, usize)>,
+}
+
+impl WorkspaceLayout {
+  /// Groups parsed types by crate and file path, then computes stacked crate/file layouts
+  /// and left-edge anchor points.
+  pub fn build(canonical_root: &Path, types: &[TypeNode]) -> Self {
+    let mut grouped: BTreeMap<PathBuf, (String, BTreeMap<PathBuf, Vec<&TypeNode>>)> =
+      BTreeMap::new();
+    let mut cargo_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
+
+    for ty in types {
+      let (crate_dir, crate_name) =
+        resolve_crate_info(&ty.file_path, canonical_root, &mut cargo_cache);
+      let entry = grouped
+        .entry(crate_dir)
+        .or_insert_with(|| (crate_name, BTreeMap::new()));
+      entry.1.entry(ty.file_path.clone()).or_default().push(ty);
+    }
+
+    let mut crates = Vec::with_capacity(grouped.len());
+    let mut type_locations = HashMap::with_capacity(types.len());
+
+    for (crate_idx, (crate_dir, (crate_name, files_map))) in grouped.into_iter().enumerate() {
+      let mut files = Vec::with_capacity(files_map.len());
+      let mut max_file_width_rem: f32 = 0.0;
+      let mut total_type_count: usize = 0;
+
+      for (file_idx, (file_path, file_types)) in files_map.into_iter().enumerate() {
+        total_type_count += file_types.len();
+        let mut type_blocks = Vec::with_capacity(file_types.len());
+        let mut offset = RemPx::ZERO;
+        let mut max_body_line_chars: usize = 0;
+
+        for (idx, type_node) in file_types.iter().enumerate() {
+          type_locations.insert(type_node.id, (crate_idx, file_idx));
+          let (header_line, rest_body, line_count, type_max_chars) =
+            split_type_body(&type_node.body);
+          max_body_line_chars = max_body_line_chars.max(type_max_chars);
+
+          let height = RemPx::new(
+            TYPE_BLOCK_PAD_Y_REM * 2.0 + line_count as f32 * TYPE_LINE_HEIGHT_REM,
+            2.0,
+          );
+
+          type_blocks.push(TypeBlock {
+            id: type_node.id,
+            header_line,
+            rest_body,
+            rest_line_count: line_count - 1,
+            span: VerticalSpan { offset, height },
+          });
+
+          offset += height;
+          if idx + 1 < file_types.len() {
+            offset += RemPx::rems(TYPE_GAP_REM);
+          }
+        }
+
+        let rel_to_crate = file_path
+          .strip_prefix(&crate_dir)
+          .or_else(|_| file_path.strip_prefix(canonical_root))
+          .unwrap_or(&file_path);
+        let file_name = rel_to_crate
+          .file_name()
+          .and_then(|n| n.to_str())
+          .unwrap_or_default()
+          .to_owned();
+        let dir_prefix = rel_to_crate
+          .parent()
+          .and_then(|p| p.to_str())
+          .filter(|s| !s.is_empty())
+          .map(|s| format!("{s}/"))
+          .unwrap_or_default();
+
+        let header_chars = dir_prefix.chars().count() + file_name.chars().count() + 12;
+        let body_min_w_rem =
+          max_body_line_chars as f32 * BODY_CHAR_WIDTH_REM + CARD_BODY_HORIZONTAL_PAD_REM;
+        let header_min_w_rem =
+          header_chars as f32 * HEADER_CHAR_WIDTH_REM + CARD_HEADER_HORIZONTAL_PAD_REM;
+        let min_width_rem = body_min_w_rem.max(header_min_w_rem);
+        max_file_width_rem = max_file_width_rem.max(min_width_rem);
+
+        let mut file_node = FileNode {
+          dir_prefix: Arc::from(dir_prefix),
+          file_name: Arc::from(file_name),
+          types: type_blocks,
+          collapsed: true,
+          span: VerticalSpan::default(),
+          body_content: offset,
+          min_width_rem,
+        };
+        file_node.recompute_dimensions();
+        files.push(file_node);
+      }
+
+      let rel_dir = crate_dir
+        .strip_prefix(canonical_root)
+        .ok()
+        .and_then(|p| p.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+
+      let crate_header_chars = crate_name.chars().count() + rel_dir.chars().count() + 24;
+      let crate_header_min_w =
+        crate_header_chars as f32 * HEADER_CHAR_WIDTH_REM + CARD_HEADER_HORIZONTAL_PAD_REM;
+      let crate_min_width_rem =
+        (max_file_width_rem + CRATE_BODY_PAD_X_REM * 2.0 + 0.25).max(crate_header_min_w);
+
+      crates.push(CrateNode {
+        name: Arc::from(crate_name),
+        rel_dir: Arc::from(rel_dir),
+        files,
+        total_type_count,
+        collapsed: true,
+        position: point2(0.0, 0.0),
+        height: RemPx::ZERO,
+        body_content: RemPx::ZERO,
+        min_width_rem: crate_min_width_rem,
+      });
+    }
+
+    let mut layout = Self {
+      crates,
+      type_anchors: HashMap::with_capacity(types.len()),
+      collapsed_targets: HashMap::new(),
+      type_locations,
+    };
+    layout.recompute();
+    layout
+  }
+
+  /// Recomputes crate positions, file offsets, box heights, edge anchors, and collapsed targets
+  /// after any crate or module is collapsed or expanded.
+  pub fn recompute(&mut self) {
+    self.type_anchors.clear();
+    self.collapsed_targets.clear();
+
+    let mut cursor_y: f32 = 0.0;
+    let crate_header_rem = CrateNode::header_height_rem();
+    let file_left_x = CRATE_BODY_PAD_X_REM * BASE_REM_SIZE + 1.0;
+
+    for (crate_idx, crate_node) in self.crates.iter_mut().enumerate() {
+      crate_node.position = point2(0.0, cursor_y);
+
+      if crate_node.collapsed {
+        crate_node.body_content = RemPx::ZERO;
+        crate_node.height = RemPx::new(crate_header_rem, 2.0);
+
+        let crate_height = crate_node.screen_height(BASE_REM_SIZE);
+        let anchor = point2(0.0, cursor_y + crate_height * 0.5);
+        for file in &crate_node.files {
+          for ty in &file.types {
+            self.type_anchors.insert(ty.id, anchor);
+            self
+              .collapsed_targets
+              .insert(ty.id, CollapsedTarget::Crate(crate_idx));
+          }
+        }
+
+        cursor_y += crate_height + CRATE_GAP_Y;
+        continue;
+      }
+
+      let crate_body_top_y = crate_node.body_content_top_y(cursor_y, BASE_REM_SIZE);
+      let mut offset = RemPx::ZERO;
+      let file_count = crate_node.files.len();
+
+      for (file_idx, file) in crate_node.files.iter_mut().enumerate() {
+        file.recompute_dimensions();
+        file.span.offset = offset;
+
+        let file_top_y = file.screen_top(crate_body_top_y, BASE_REM_SIZE);
+
+        if file.collapsed {
+          let file_height = file.screen_height(BASE_REM_SIZE);
+          let anchor = point2(file_left_x, file_top_y + file_height * 0.5);
+          for ty in &file.types {
+            self.type_anchors.insert(ty.id, anchor);
+            self
+              .collapsed_targets
+              .insert(ty.id, CollapsedTarget::File(crate_idx, file_idx));
+          }
+        } else {
+          let body_top_y = file.body_content_top_y(file_top_y, BASE_REM_SIZE);
+          for ty in &file.types {
+            let ty_top = ty.span.screen_top(body_top_y, BASE_REM_SIZE);
+            let ty_height = ty.span.screen_height(BASE_REM_SIZE);
+            self
+              .type_anchors
+              .insert(ty.id, point2(file_left_x, ty_top + ty_height * 0.5));
+          }
+        }
+
+        offset += file.span.height;
+        if file_idx + 1 < file_count {
+          offset += RemPx::rems(FILE_GAP_REM);
+        }
+      }
+
+      crate_node.body_content = offset;
+      crate_node.height = RemPx::new(crate_header_rem + CRATE_BODY_PAD_Y_REM * 2.0, 3.0) + offset;
+
+      cursor_y += crate_node.screen_height(BASE_REM_SIZE) + CRATE_GAP_Y;
+    }
+  }
+
+  pub fn type_anchor(&self, type_id: TypeId) -> Option<Point2> {
+    self.type_anchors.get(&type_id).copied()
+  }
+
+  pub fn toggle_crate(&mut self, crate_idx: usize) -> bool {
+    let Some(crate_node) = self.crates.get_mut(crate_idx) else {
+      return false;
+    };
+    crate_node.collapsed = !crate_node.collapsed;
+    self.recompute();
+    true
+  }
+
+  pub fn toggle_file(&mut self, crate_idx: usize, file_idx: usize) -> bool {
+    let Some(file_node) = self
+      .crates
+      .get_mut(crate_idx)
+      .and_then(|c| c.files.get_mut(file_idx))
+    else {
+      return false;
+    };
+    file_node.collapsed = !file_node.collapsed;
+    self.recompute();
+    true
+  }
+
+  pub fn expand_all(&mut self) {
+    for crate_node in &mut self.crates {
+      crate_node.collapsed = false;
+      for file_node in &mut crate_node.files {
+        file_node.collapsed = false;
+      }
+    }
+    self.recompute();
+  }
+
+  pub fn collapse_all_files(&mut self) {
+    for crate_node in &mut self.crates {
+      for file_node in &mut crate_node.files {
+        file_node.collapsed = true;
+      }
+    }
+    self.recompute();
+  }
+
+  pub fn collapse_all_crates(&mut self) {
+    for crate_node in &mut self.crates {
+      crate_node.collapsed = true;
+    }
+    self.recompute();
+  }
+
+  pub fn ensure_type_expanded(&mut self, type_id: TypeId) -> bool {
+    let Some(&(crate_idx, file_idx)) = self.type_locations.get(&type_id) else {
+      return false;
+    };
+    let Some(crate_node) = self.crates.get_mut(crate_idx) else {
+      return false;
+    };
+    let mut changed = false;
+    if crate_node.collapsed {
+      crate_node.collapsed = false;
+      changed = true;
+    }
+    if let Some(file_node) = crate_node.files.get_mut(file_idx)
+      && file_node.collapsed
+    {
+      file_node.collapsed = false;
+      changed = true;
+    }
+    if changed {
+      self.recompute();
+    }
+    changed
+  }
+
+  pub fn iter_edge_curves<'a>(
+    &'a self,
+    graph: &'a Graph,
+    pan: Point2,
+    zoom: f32,
+    cull_rect: Option<(Rect, f32)>,
+  ) -> impl Iterator<Item = EdgeCurve> + 'a {
+    edges::iter_edge_curves(graph, self, pan, zoom, cull_rect)
+  }
+
+  pub fn hit_test_edge(
+    &self,
+    graph: &Graph,
+    pan: Point2,
+    zoom: f32,
+    screen_pos: Point2,
+  ) -> Option<EdgeId> {
+    edges::hit_test_edge(graph, self, pan, zoom, screen_pos)
+  }
+}
+
+/// Computes the contiguous range of visible items inside a vertically stacked container, plus
+/// top/bottom spacer heights (in screen px) that preserve exact vertical alignment with anchors.
+fn visible_slice<T>(
+  items: &[T],
+  span_of: impl Fn(&T) -> VerticalSpan,
+  body_content_top_y: f32,
+  body_content: RemPx,
+  gap_rem: f32,
+  rem_size: f32,
+  (vp_min_y, vp_max_y): (f32, f32),
+) -> (Range<usize>, f32, f32) {
+  if items.is_empty() {
+    return (0..0, 0.0, 0.0);
+  }
+
+  let first = items.partition_point(|item| {
+    let span = span_of(item);
+    span.screen_top(body_content_top_y, rem_size) + span.screen_height(rem_size) < vp_min_y
+  });
+
+  if first >= items.len() {
+    return (0..0, body_content.to_px(rem_size), 0.0);
+  }
+
+  let last = first
+    + items[first..]
+      .partition_point(|item| span_of(item).screen_top(body_content_top_y, rem_size) <= vp_max_y);
+
+  if first == last {
+    return (0..0, body_content.to_px(rem_size), 0.0);
+  }
+
+  let gap = RemPx::rems(gap_rem);
+  let top_spacer_px = if first > 0 {
+    (span_of(&items[first]).offset - gap).to_px(rem_size).max(0.0)
+  } else {
+    0.0
+  };
+
+  let bottom_spacer_px = if last < items.len() {
+    let last_span = span_of(&items[last - 1]);
+    let last_end = last_span.offset + last_span.height;
+    (body_content - last_end - gap).to_px(rem_size).max(0.0)
+  } else {
+    0.0
+  };
+
+  (first..last, top_spacer_px, bottom_spacer_px)
 }
 
 /// Splits a type body into its first line (header) and remaining lines (rest_body),
@@ -249,337 +627,9 @@ fn resolve_crate_info(
   (canonical_root.to_path_buf(), fallback_name)
 }
 
-pub struct LayoutResult {
-  pub type_anchors: HashMap<TypeId, Point2>,
-  pub collapsed_targets: HashMap<TypeId, CollapsedTarget>,
-}
-
-/// Groups parsed types by crate and file path, then computes stacked crate/file layouts
-/// and left-edge anchor points.
-pub fn build_crate_nodes(
-  canonical_root: &Path,
-  types: Vec<TypeNode>,
-) -> (Vec<CrateNode>, LayoutResult) {
-  let mut grouped: BTreeMap<PathBuf, (String, BTreeMap<PathBuf, Vec<TypeNode>>)> = BTreeMap::new();
-  let mut cargo_cache: HashMap<PathBuf, Option<String>> = HashMap::new();
-
-  for ty in types {
-    let (crate_dir, crate_name) =
-      resolve_crate_info(&ty.file_path, canonical_root, &mut cargo_cache);
-    let entry = grouped
-      .entry(crate_dir)
-      .or_insert_with(|| (crate_name, BTreeMap::new()));
-    entry.1.entry(ty.file_path.clone()).or_default().push(ty);
-  }
-
-  let mut crates = Vec::with_capacity(grouped.len());
-
-  for (crate_dir, (crate_name, files_map)) in grouped {
-    let mut files = Vec::with_capacity(files_map.len());
-    let mut max_file_width_rem: f32 = 0.0;
-    let mut total_type_count: usize = 0;
-
-    for (file_path, file_types) in files_map {
-      total_type_count += file_types.len();
-      let mut type_blocks = Vec::with_capacity(file_types.len());
-      let mut type_layouts = Vec::with_capacity(file_types.len());
-      let mut offset_rem: f32 = 0.0;
-      let mut offset_px: f32 = 0.0;
-      let mut max_body_line_chars: usize = 0;
-
-      for (idx, type_node) in file_types.iter().enumerate() {
-        let (header_line, rest_body, line_count, type_max_chars) = split_type_body(&type_node.body);
-        max_body_line_chars = max_body_line_chars.max(type_max_chars);
-
-        let lines = line_count as f32;
-        let block_height_rem = TYPE_BLOCK_PAD_Y_REM * 2.0 + lines * TYPE_LINE_HEIGHT_REM;
-        let block_border_px = 2.0;
-
-        type_blocks.push(TypeBlock {
-          id: type_node.id,
-          header_line,
-          rest_body,
-          rest_line_count: line_count - 1,
-        });
-        type_layouts.push(TypeLayout {
-          offset_rem,
-          offset_px,
-          height_rem: block_height_rem,
-          border_px: block_border_px,
-        });
-
-        offset_rem += block_height_rem;
-        offset_px += block_border_px;
-        if idx + 1 < file_types.len() {
-          offset_rem += TYPE_GAP_REM;
-        }
-      }
-
-      let rel_to_crate = file_path
-        .strip_prefix(&crate_dir)
-        .or_else(|_| file_path.strip_prefix(canonical_root))
-        .unwrap_or(&file_path);
-      let file_name = rel_to_crate
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default()
-        .to_owned();
-      let dir_prefix = rel_to_crate
-        .parent()
-        .and_then(|p| p.to_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| format!("{s}/"))
-        .unwrap_or_default();
-
-      let header_chars = dir_prefix.chars().count() + file_name.chars().count() + 12;
-      let body_min_w_rem =
-        max_body_line_chars as f32 * BODY_CHAR_WIDTH_REM + CARD_BODY_HORIZONTAL_PAD_REM;
-      let header_min_w_rem =
-        header_chars as f32 * HEADER_CHAR_WIDTH_REM + CARD_HEADER_HORIZONTAL_PAD_REM;
-      let min_width_rem = body_min_w_rem.max(header_min_w_rem);
-      max_file_width_rem = max_file_width_rem.max(min_width_rem);
-
-      let mut file_node = FileNode {
-        dir_prefix: Arc::from(dir_prefix),
-        file_name: Arc::from(file_name),
-        types: type_blocks,
-        type_layouts,
-        collapsed: true,
-        offset_rem: 0.0,
-        offset_px: 0.0,
-        height_rem: 0.0,
-        fixed_border_px: 0.0,
-        body_content_rem: offset_rem,
-        body_content_px: offset_px,
-        min_width_rem,
-      };
-      file_node.recompute_dimensions();
-      files.push(file_node);
-    }
-
-    let rel_dir = crate_dir
-      .strip_prefix(canonical_root)
-      .ok()
-      .and_then(|p| p.to_str())
-      .filter(|s| !s.is_empty())
-      .unwrap_or_default()
-      .to_owned();
-
-    let crate_header_chars = crate_name.chars().count() + rel_dir.chars().count() + 24;
-    let crate_header_min_w =
-      crate_header_chars as f32 * HEADER_CHAR_WIDTH_REM + CARD_HEADER_HORIZONTAL_PAD_REM;
-    let crate_min_width_rem =
-      (max_file_width_rem + CRATE_BODY_PAD_X_REM * 2.0 + 0.25).max(crate_header_min_w);
-
-    crates.push(CrateNode {
-      name: Arc::from(crate_name),
-      rel_dir: Arc::from(rel_dir),
-      files,
-      total_type_count,
-      collapsed: true,
-      position: point2(0.0, 0.0),
-      height_rem: 0.0,
-      fixed_border_px: 0.0,
-      body_content_rem: 0.0,
-      body_content_px: 0.0,
-      min_width_rem: crate_min_width_rem,
-    });
-  }
-
-  let layout = recompute_layout(&mut crates);
-  (crates, layout)
-}
-
-/// Recomputes crate positions, file offsets, box heights, edge anchors, and collapsed targets
-/// after any crate or module is collapsed or expanded.
-pub fn recompute_layout(crates: &mut [CrateNode]) -> LayoutResult {
-  let mut type_anchors = HashMap::new();
-  let mut collapsed_targets = HashMap::new();
-  let mut cursor_y: f32 = 0.0;
-
-  let crate_header_rem = CrateNode::header_height_rem();
-  let file_left_x = CRATE_BODY_PAD_X_REM * BASE_REM_SIZE + 1.0;
-
-  for (crate_idx, crate_node) in crates.iter_mut().enumerate() {
-    crate_node.position = point2(0.0, cursor_y);
-
-    if crate_node.collapsed {
-      crate_node.body_content_rem = 0.0;
-      crate_node.body_content_px = 0.0;
-      crate_node.height_rem = crate_header_rem;
-      crate_node.fixed_border_px = 2.0;
-
-      let crate_height = crate_node.screen_height(BASE_REM_SIZE);
-      let anchor = point2(0.0, cursor_y + crate_height * 0.5);
-      for file in &crate_node.files {
-        for ty in &file.types {
-          type_anchors.insert(ty.id, anchor);
-          collapsed_targets.insert(ty.id, CollapsedTarget::Crate(crate_idx));
-        }
-      }
-
-      cursor_y += crate_height + CRATE_GAP_Y;
-      continue;
-    }
-
-    let crate_body_top_y = crate_node.body_content_top_y(cursor_y, BASE_REM_SIZE);
-    let mut offset_rem: f32 = 0.0;
-    let mut offset_px: f32 = 0.0;
-    let file_count = crate_node.files.len();
-
-    for (file_idx, file) in crate_node.files.iter_mut().enumerate() {
-      file.recompute_dimensions();
-      file.offset_rem = offset_rem;
-      file.offset_px = offset_px;
-
-      let file_top_y = file.screen_top(crate_body_top_y, BASE_REM_SIZE);
-
-      if file.collapsed {
-        let file_height = file.screen_height(BASE_REM_SIZE);
-        let anchor = point2(file_left_x, file_top_y + file_height * 0.5);
-        for ty in &file.types {
-          type_anchors.insert(ty.id, anchor);
-          collapsed_targets.insert(ty.id, CollapsedTarget::File(crate_idx, file_idx));
-        }
-      } else {
-        let body_top_y = file.body_content_top_y(file_top_y, BASE_REM_SIZE);
-        for (ty, layout) in file.types.iter().zip(&file.type_layouts) {
-          let ty_top = layout.screen_top(body_top_y, BASE_REM_SIZE);
-          let ty_height = layout.screen_height(BASE_REM_SIZE);
-          type_anchors.insert(ty.id, point2(file_left_x, ty_top + ty_height * 0.5));
-        }
-      }
-
-      offset_rem += file.height_rem;
-      offset_px += file.fixed_border_px;
-      if file_idx + 1 < file_count {
-        offset_rem += FILE_GAP_REM;
-      }
-    }
-
-    crate_node.body_content_rem = offset_rem;
-    crate_node.body_content_px = offset_px;
-    crate_node.height_rem = crate_header_rem + CRATE_BODY_PAD_Y_REM * 2.0 + offset_rem;
-    crate_node.fixed_border_px = 3.0 + offset_px;
-
-    let crate_height = crate_node.screen_height(BASE_REM_SIZE);
-    cursor_y += crate_height + CRATE_GAP_Y;
-  }
-
-  LayoutResult {
-    type_anchors,
-    collapsed_targets,
-  }
-}
-
-/// Computes the contiguous range of visible file indices inside an expanded crate, plus top/bottom
-/// spacer heights (in screen px) that preserve exact vertical alignment with edge anchors.
-pub fn visible_file_slice(
-  files: &[FileNode],
-  crate_body_content_top_y: f32,
-  body_content_rem: f32,
-  body_content_px: f32,
-  rem_size: f32,
-  vp_min_y: f32,
-  vp_max_y: f32,
-) -> (std::ops::Range<usize>, f32, f32) {
-  if files.is_empty() {
-    return (0..0, 0.0, 0.0);
-  }
-
-  let first = files.partition_point(|file| {
-    file.screen_top(crate_body_content_top_y, rem_size) + file.screen_height(rem_size) < vp_min_y
-  });
-
-  if first >= files.len() {
-    let full = body_content_rem * rem_size + body_content_px;
-    return (0..0, full, 0.0);
-  }
-
-  let last = first
-    + files[first..]
-      .partition_point(|file| file.screen_top(crate_body_content_top_y, rem_size) <= vp_max_y);
-
-  if first == last {
-    let full = body_content_rem * rem_size + body_content_px;
-    return (0..0, full, 0.0);
-  }
-
-  let top_spacer_px = if first > 0 {
-    let first_file = &files[first];
-    ((first_file.offset_rem - FILE_GAP_REM) * rem_size + first_file.offset_px).max(0.0)
-  } else {
-    0.0
-  };
-
-  let bottom_spacer_px = if last < files.len() {
-    let last_visible = &files[last - 1];
-    let last_end_rem = last_visible.offset_rem + last_visible.height_rem;
-    let last_end_px = last_visible.offset_px + last_visible.fixed_border_px;
-    ((body_content_rem - last_end_rem - FILE_GAP_REM) * rem_size + (body_content_px - last_end_px))
-      .max(0.0)
-  } else {
-    0.0
-  };
-
-  (first..last, top_spacer_px, bottom_spacer_px)
-}
-
-/// Computes the contiguous range of visible type indices inside a card, plus top/bottom spacer
-/// heights (in screen px) that preserve exact vertical alignment with edge anchors.
-pub fn visible_type_slice(
-  type_layouts: &[TypeLayout],
-  body_content_top_y: f32,
-  body_content_rem: f32,
-  body_content_px: f32,
-  rem_size: f32,
-  vp_min_y: f32,
-  vp_max_y: f32,
-) -> (std::ops::Range<usize>, f32, f32) {
-  if type_layouts.is_empty() {
-    return (0..0, 0.0, 0.0);
-  }
-
-  let first = type_layouts.partition_point(|layout| {
-    layout.screen_top(body_content_top_y, rem_size) + layout.screen_height(rem_size) < vp_min_y
-  });
-
-  if first >= type_layouts.len() {
-    let full = body_content_rem * rem_size + body_content_px;
-    return (0..0, full, 0.0);
-  }
-
-  let last = first
-    + type_layouts[first..]
-      .partition_point(|layout| layout.screen_top(body_content_top_y, rem_size) <= vp_max_y);
-
-  if first == last {
-    let full = body_content_rem * rem_size + body_content_px;
-    return (0..0, full, 0.0);
-  }
-
-  let top_spacer_px = if first > 0 {
-    let first_layout = &type_layouts[first];
-    ((first_layout.offset_rem - TYPE_GAP_REM) * rem_size + first_layout.offset_px).max(0.0)
-  } else {
-    0.0
-  };
-
-  let bottom_spacer_px = if last < type_layouts.len() {
-    let last_visible = &type_layouts[last - 1];
-    let last_end_rem = last_visible.offset_rem + last_visible.height_rem;
-    let last_end_px = last_visible.offset_px + last_visible.border_px;
-    ((body_content_rem - last_end_rem - TYPE_GAP_REM) * rem_size + (body_content_px - last_end_px))
-      .max(0.0)
-  } else {
-    0.0
-  };
-
-  (first..last, top_spacer_px, bottom_spacer_px)
-}
-
 #[cfg(test)]
 mod tests {
+  use graph::TypeKind;
   use lsp::Position;
 
   use super::*;
@@ -588,13 +638,10 @@ mod tests {
     TypeNode {
       id: TypeId(id),
       name: name.to_owned(),
-      kind: "struct".to_owned(),
+      kind: TypeKind::Struct,
       body: body.to_owned(),
       file_path: PathBuf::from(file_path),
-      position: Position {
-        line: 0,
-        character: 0,
-      },
+      position: Position::new(0, 0),
     }
   }
 
@@ -620,45 +667,37 @@ mod tests {
   }
 
   #[test]
-  fn visible_type_slice_preserves_total_body_height_across_zooms() {
-    // Build 10 type layouts with varying line counts.
+  fn visible_slice_preserves_total_body_height_across_zooms() {
     let line_counts = [2, 5, 1, 8, 3, 4, 6, 2, 7, 3];
-    let mut layouts = Vec::new();
-    let mut offset_rem = 0.0_f32;
-    let mut offset_px = 0.0_f32;
+    let mut spans = Vec::new();
+    let mut offset = RemPx::ZERO;
     for (idx, &lines) in line_counts.iter().enumerate() {
-      let height_rem = TYPE_BLOCK_PAD_Y_REM * 2.0 + lines as f32 * TYPE_LINE_HEIGHT_REM;
-      let border_px = 2.0;
-      layouts.push(TypeLayout {
-        offset_rem,
-        offset_px,
-        height_rem,
-        border_px,
-      });
-      offset_rem += height_rem;
-      offset_px += border_px;
+      let height = RemPx::new(
+        TYPE_BLOCK_PAD_Y_REM * 2.0 + lines as f32 * TYPE_LINE_HEIGHT_REM,
+        2.0,
+      );
+      spans.push(VerticalSpan { offset, height });
+      offset += height;
       if idx + 1 < line_counts.len() {
-        offset_rem += TYPE_GAP_REM;
+        offset += RemPx::rems(TYPE_GAP_REM);
       }
     }
-    let body_content_rem = offset_rem;
-    let body_content_px = offset_px;
+    let body_content = offset;
 
     for zoom in [0.25_f32, 1.0, 2.5] {
       let rem_size = BASE_REM_SIZE * zoom;
       let gap_px = TYPE_GAP_REM * rem_size;
-      let full_height = body_content_rem * rem_size + body_content_px;
+      let full_height = body_content.to_px(rem_size);
 
-      // Position card so middle types intersect [0, 300]
       let body_top_y = -full_height * 0.35;
-      let (range, top_spacer, bottom_spacer) = visible_type_slice(
-        &layouts,
+      let (range, top_spacer, bottom_spacer) = visible_slice(
+        &spans,
+        |&s| s,
         body_top_y,
-        body_content_rem,
-        body_content_px,
+        body_content,
+        TYPE_GAP_REM,
         rem_size,
-        0.0,
-        300.0,
+        (0.0, 300.0),
       );
 
       assert!(!range.is_empty());
@@ -666,8 +705,8 @@ mod tests {
       if top_spacer > 0.0 {
         child_heights.push(top_spacer);
       }
-      for layout in &layouts[range.clone()] {
-        child_heights.push(layout.screen_height(rem_size));
+      for span in &spans[range.clone()] {
+        child_heights.push(span.screen_height(rem_size));
       }
       if bottom_spacer > 0.0 {
         child_heights.push(bottom_spacer);
@@ -680,8 +719,7 @@ mod tests {
         "zoom={zoom}: reconstructed={reconstructed} != full_height={full_height}"
       );
 
-      // Also verify the first visible type lands at its exact original Y coordinate.
-      let expected_first_y = layouts[range.start].screen_top(body_top_y, rem_size);
+      let expected_first_y = spans[range.start].screen_top(body_top_y, rem_size);
       let actual_first_y = if top_spacer > 0.0 {
         body_top_y + top_spacer + gap_px
       } else {
@@ -695,7 +733,7 @@ mod tests {
   }
 
   #[test]
-  fn build_crate_nodes_groups_by_crate_and_recomputes_on_collapse() {
+  fn workspace_layout_groups_by_crate_and_recomputes_on_collapse() {
     let root = PathBuf::from("/workspace");
     let types = vec![
       dummy_type(
@@ -709,61 +747,50 @@ mod tests {
       dummy_type(3, "D", "/workspace/crates/beta/src/lib.rs", "pub struct D;"),
     ];
 
-    let (mut crates, initial) = build_crate_nodes(&root, types);
-    assert_eq!(crates.len(), 2);
-    assert_eq!(crates[0].name.as_ref(), "alpha");
-    assert_eq!(crates[0].rel_dir.as_ref(), "crates/alpha");
-    assert_eq!(crates[0].files.len(), 2);
-    assert_eq!(crates[0].files[0].dir_prefix.as_ref(), "src/");
-    assert_eq!(crates[0].files[0].file_name.as_ref(), "a.rs");
-    assert_eq!(crates[1].name.as_ref(), "beta");
+    let mut layout = WorkspaceLayout::build(&root, &types);
+    assert_eq!(layout.crates.len(), 2);
+    assert_eq!(layout.crates[0].name.as_ref(), "alpha");
+    assert_eq!(layout.crates[0].rel_dir.as_ref(), "crates/alpha");
+    assert_eq!(layout.crates[0].files.len(), 2);
+    assert_eq!(layout.crates[0].files[0].dir_prefix.as_ref(), "src/");
+    assert_eq!(layout.crates[0].files[0].file_name.as_ref(), "a.rs");
+    assert_eq!(layout.crates[1].name.as_ref(), "beta");
 
     // All crates and files start collapsed by default.
-    assert!(crates.iter().all(|c| c.collapsed));
-    assert!(crates.iter().all(|c| c.files.iter().all(|f| f.collapsed)));
-    assert_eq!(
-      initial.type_anchors.get(&TypeId(0)),
-      initial.type_anchors.get(&TypeId(2))
+    assert!(layout.crates.iter().all(|c| c.collapsed));
+    assert!(
+      layout
+        .crates
+        .iter()
+        .all(|c| c.files.iter().all(|f| f.collapsed))
     );
+    assert_eq!(layout.type_anchor(TypeId(0)), layout.type_anchor(TypeId(2)));
+    assert_eq!(layout.type_anchor(TypeId(0)).map(|p| p.x), Some(0.0));
     assert_eq!(
-      initial.type_anchors.get(&TypeId(0)).map(|p| p.x),
-      Some(0.0)
-    );
-    assert_eq!(
-      initial.collapsed_targets.get(&TypeId(2)),
+      layout.collapsed_targets.get(&TypeId(2)),
       Some(&CollapsedTarget::Crate(0))
     );
 
     // Expanding crate 0 while its files remain collapsed shifts beta down and targets each file.
-    let collapsed_crate_beta_y = crates[1].position.y;
-    crates[0].collapsed = false;
-    let after_crate_expand = recompute_layout(&mut crates);
-    assert!(crates[1].position.y > collapsed_crate_beta_y);
+    let collapsed_crate_beta_y = layout.crates[1].position.y;
+    assert!(layout.toggle_crate(0));
+    assert!(layout.crates[1].position.y > collapsed_crate_beta_y);
+    assert_eq!(layout.type_anchor(TypeId(0)), layout.type_anchor(TypeId(1)));
     assert_eq!(
-      after_crate_expand.type_anchors.get(&TypeId(0)),
-      after_crate_expand.type_anchors.get(&TypeId(1))
-    );
-    assert_eq!(
-      after_crate_expand.collapsed_targets.get(&TypeId(0)),
+      layout.collapsed_targets.get(&TypeId(0)),
       Some(&CollapsedTarget::File(0, 0))
     );
     assert_eq!(
-      after_crate_expand.collapsed_targets.get(&TypeId(2)),
+      layout.collapsed_targets.get(&TypeId(2)),
       Some(&CollapsedTarget::File(0, 1))
     );
 
-    // Expanding all files in crate 0 shifts beta down further and separates type anchors.
-    let beta_y_with_collapsed_files = crates[1].position.y;
-    for file in &mut crates[0].files {
-      file.collapsed = false;
-    }
-    let after_files_expand = recompute_layout(&mut crates);
-    assert!(crates[1].position.y > beta_y_with_collapsed_files);
-    assert_eq!(after_files_expand.collapsed_targets.get(&TypeId(0)), None);
-    assert_eq!(after_files_expand.collapsed_targets.get(&TypeId(2)), None);
-    assert_ne!(
-      after_files_expand.type_anchors.get(&TypeId(0)),
-      after_files_expand.type_anchors.get(&TypeId(1))
-    );
+    // ensure_type_expanded expands the target file in O(1) and separates type anchors.
+    let beta_y_with_collapsed_files = layout.crates[1].position.y;
+    assert!(layout.ensure_type_expanded(TypeId(0)));
+    assert!(!layout.ensure_type_expanded(TypeId(0)));
+    assert!(layout.crates[1].position.y > beta_y_with_collapsed_files);
+    assert_eq!(layout.collapsed_targets.get(&TypeId(0)), None);
+    assert_ne!(layout.type_anchor(TypeId(0)), layout.type_anchor(TypeId(1)));
   }
 }

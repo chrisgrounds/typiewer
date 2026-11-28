@@ -1,9 +1,6 @@
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use command_palette::{CommandItem, CommandPalette, CommandPaletteEvent, ToggleCommandPalette};
-use finder::{FinderEvent, ToggleFinder, TypeFinder};
 use gpui::{
   App, Bounds, Context, Entity, FocusHandle, KeyBinding, MouseButton, MouseDownEvent,
   MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, TitlebarOptions,
@@ -11,18 +8,21 @@ use gpui::{
   px, rgb, size,
 };
 use gpui_platform::application;
-use graph::{FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
+use graph::{Graph, TypeId, canonicalize_or_keep, resolve_with_rust_analyzer};
 use layout::metrics::{BASE_REM_SIZE, VIEWPORT_OVERSCAN_X_PX, VIEWPORT_OVERSCAN_Y_PX};
-use layout::{
-  CollapsedTarget, CrateNode, Point2, ViewportRect, build_crate_nodes, hit_test_edge, point2,
-  recompute_layout,
-};
-use lsp::LspClient;
+use layout::{Point2, Rect, WorkspaceLayout, point2};
+use palette::{FuzzyPalette, PaletteEvent, ToggleCommandPalette, ToggleFinder};
 use state::{Camera, InspectorState, LspStatus, Selection, ViewerSettings};
 use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
 use ui::file_card::FileCardEvent;
 use ui::inspector::InspectorEvent;
+use ui::theme::to_point2;
 use ui::top_bar::TopBarEvent;
+
+use crate::palettes::{
+  AppCommand, COMMAND_PALETTE_CONFIG, TYPE_FINDER_CONFIG, build_command_items,
+  build_type_finder_items,
+};
 
 fn workspace_title(root: &Path) -> String {
   root
@@ -33,21 +33,6 @@ fn workspace_title(root: &Path) -> String {
     .to_owned()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AppCommand {
-  ToggleDotGrid,
-  ToggleEdges,
-  ToggleZoomBadge,
-  OpenTypeFinder,
-  ExpandAll,
-  CollapseAllFiles,
-  CollapseAllCrates,
-  ZoomIn,
-  ZoomOut,
-  ResetZoom,
-  ClearSelection,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum ActiveOverlay {
   #[default]
@@ -56,70 +41,10 @@ enum ActiveOverlay {
   CommandPalette,
 }
 
-fn on_off(value: bool) -> &'static str {
-  if value { "On" } else { "Off" }
-}
-
-fn build_command_items(settings: ViewerSettings) -> Vec<CommandItem<AppCommand>> {
-  vec![
-    CommandItem::new(AppCommand::ToggleDotGrid, "Settings", "Toggle Dot Grid")
-      .with_detail(on_off(settings.show_dot_grid))
-      .with_keywords("background canvas dots grid"),
-    CommandItem::new(
-      AppCommand::ToggleEdges,
-      "Settings",
-      "Toggle Function Edges",
-    )
-    .with_detail(on_off(settings.show_edges))
-    .with_keywords("arrows lines connections graph"),
-    CommandItem::new(
-      AppCommand::ToggleZoomBadge,
-      "Settings",
-      "Toggle Zoom Indicator",
-    )
-    .with_detail(on_off(settings.show_zoom_badge))
-    .with_keywords("hud badge percentage"),
-    CommandItem::new(AppCommand::OpenTypeFinder, "Navigation", "Go to Type...")
-      .with_detail("⌘P")
-      .with_keywords("find search jump struct enum trait"),
-    CommandItem::new(
-      AppCommand::ExpandAll,
-      "Layout",
-      "Expand All Crates & Files",
-    )
-    .with_keywords("unfold open show"),
-    CommandItem::new(AppCommand::CollapseAllFiles, "Layout", "Collapse All Files")
-      .with_keywords("fold hide"),
-    CommandItem::new(
-      AppCommand::CollapseAllCrates,
-      "Layout",
-      "Collapse All Crates",
-    )
-    .with_keywords("fold hide"),
-    CommandItem::new(AppCommand::ZoomIn, "View", "Zoom In")
-      .with_detail("⌘+")
-      .with_keywords("scale magnify"),
-    CommandItem::new(AppCommand::ZoomOut, "View", "Zoom Out")
-      .with_detail("⌘-")
-      .with_keywords("scale shrink"),
-    CommandItem::new(AppCommand::ResetZoom, "View", "Reset Zoom & Pan")
-      .with_detail("⌘0")
-      .with_keywords("camera center default 100%"),
-    CommandItem::new(AppCommand::ClearSelection, "Selection", "Clear Selection")
-      .with_detail("Esc")
-      .with_keywords("deselect close inspector"),
-  ]
-}
-
 pub struct Application {
   canonical_root: PathBuf,
-  crates: Vec<CrateNode>,
-  types: Vec<TypeNode>,
-  functions: Vec<FunctionInfo>,
-  edges: Vec<GraphEdge>,
-  directed_pairs: HashSet<(TypeId, TypeId)>,
-  type_anchors: HashMap<TypeId, Point2>,
-  collapsed_targets: HashMap<TypeId, CollapsedTarget>,
+  graph: Graph,
+  layout: WorkspaceLayout,
   selection: Selection,
   inspector: InspectorState,
   settings: ViewerSettings,
@@ -128,8 +53,8 @@ pub struct Application {
   _lsp_task: Task<()>,
   camera: Camera,
   focus_handle: FocusHandle,
-  finder: Entity<TypeFinder>,
-  command_palette: Entity<CommandPalette<AppCommand>>,
+  finder: Entity<FuzzyPalette<TypeId>>,
+  command_palette: Entity<FuzzyPalette<AppCommand>>,
   active_overlay: ActiveOverlay,
   _finder_subscription: Subscription,
   _command_palette_subscription: Subscription,
@@ -137,38 +62,35 @@ pub struct Application {
 
 impl Application {
   fn new(
-    workspace_root: PathBuf,
+    canonical_root: PathBuf,
     graph: Graph,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let canonical_root =
-      std::fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
-    let types_for_lsp = graph.types.clone();
-    let functions_for_lsp = graph.functions.clone();
-    let all_types = graph.types.clone();
+    let layout = WorkspaceLayout::build(&canonical_root, &graph.types);
 
-    let (crates, layout) = build_crate_nodes(&canonical_root, graph.types);
+    let lsp_root = canonical_root.clone();
+    let type_refs = graph.type_refs();
+    let functions_for_lsp = graph.functions.clone();
 
     let lsp_task = cx.spawn(async move |this, cx| {
       let result = cx
         .background_executor()
         .spawn(async move {
-          let lsp = LspClient::start_rust_analyzer(&workspace_root)?;
-          lsp.wait_until_ready(Duration::from_secs(60))?;
-          let resolution = Graph::resolve_edges(&types_for_lsp, &functions_for_lsp, &lsp);
-          let _ = lsp.shutdown();
-          Ok::<GraphResolution, lsp::LspError>(resolution)
+          resolve_with_rust_analyzer(
+            &lsp_root,
+            &type_refs,
+            functions_for_lsp,
+            Duration::from_secs(60),
+          )
         })
         .await;
 
       let _ = this.update(cx, |app, cx| {
         match result {
           Ok(resolution) => {
-            app.directed_pairs = resolution.edges.iter().map(|e| (e.from, e.to)).collect();
-            app.edges = resolution.edges;
-            app.functions = resolution.functions;
-            app.selection.refresh_connected_types(&app.edges);
+            app.graph.apply_resolution(resolution);
+            app.selection.refresh_connected_types(&app.graph.edges);
             app.lsp_status = LspStatus::Ready;
           }
           Err(err) => {
@@ -179,23 +101,21 @@ impl Application {
       });
     });
 
-    let directed_pairs = graph.edges.iter().map(|e| (e.from, e.to)).collect();
     let settings = ViewerSettings::default();
-    let finder = cx.new(|cx| TypeFinder::new(&canonical_root, &all_types, cx));
+    let finder_items = build_type_finder_items(&canonical_root, &graph.types);
+    let finder = cx.new(|cx| FuzzyPalette::new(TYPE_FINDER_CONFIG, finder_items, cx));
     let finder_subscription = cx.subscribe_in(&finder, window, Self::on_finder_event);
-    let command_palette = cx.new(|cx| CommandPalette::new(build_command_items(settings), cx));
+
+    let command_palette = cx.new(|cx| {
+      FuzzyPalette::new(COMMAND_PALETTE_CONFIG, build_command_items(settings), cx)
+    });
     let command_palette_subscription =
       cx.subscribe_in(&command_palette, window, Self::on_command_palette_event);
 
     Self {
       canonical_root,
-      crates,
-      types: all_types,
-      functions: graph.functions,
-      edges: graph.edges,
-      directed_pairs,
-      type_anchors: layout.type_anchors,
-      collapsed_targets: layout.collapsed_targets,
+      graph,
+      layout,
       selection: Selection::default(),
       inspector: InspectorState::default(),
       settings,
@@ -225,22 +145,21 @@ impl Application {
     }
   }
 
-  fn zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
+  fn zoom_by(&mut self, factor: f32, window: &mut Window, cx: &mut Context<Self>) {
     let viewport = window.viewport_size();
     let center = point2(
       f32::from(viewport.width) * 0.5,
       f32::from(viewport.height) * 0.5,
     );
-    self.set_zoom_around(self.camera.zoom * 1.15, center, window, cx);
+    self.set_zoom_around(self.camera.zoom * factor, center, window, cx);
+  }
+
+  fn zoom_in(&mut self, _: &ZoomIn, window: &mut Window, cx: &mut Context<Self>) {
+    self.zoom_by(1.15, window, cx);
   }
 
   fn zoom_out(&mut self, _: &ZoomOut, window: &mut Window, cx: &mut Context<Self>) {
-    let viewport = window.viewport_size();
-    let center = point2(
-      f32::from(viewport.width) * 0.5,
-      f32::from(viewport.height) * 0.5,
-    );
-    self.set_zoom_around(self.camera.zoom / 1.15, center, window, cx);
+    self.zoom_by(1.0 / 1.15, window, cx);
   }
 
   fn reset_zoom(&mut self, _: &ResetZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -256,19 +175,26 @@ impl Application {
     }
   }
 
-  fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.active_overlay = ActiveOverlay::TypeFinder;
+  fn close_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.active_overlay = ActiveOverlay::None;
+    window.focus(&self.focus_handle, cx);
+  }
+
+  fn prepare_overlay(&mut self, overlay: ActiveOverlay) {
+    self.active_overlay = overlay;
     self.inspector.end_drag();
     self.camera.drag_last_pos = None;
-    self
-      .finder
-      .update(cx, |finder, cx| finder.reset(window, cx));
+    self.selection.hovered_edge = None;
+  }
+
+  fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.prepare_overlay(ActiveOverlay::TypeFinder);
+    self.finder.update(cx, |finder, cx| finder.reset(window, cx));
   }
 
   fn toggle_finder(&mut self, _: &ToggleFinder, window: &mut Window, cx: &mut Context<Self>) {
     if self.active_overlay == ActiveOverlay::TypeFinder {
-      self.active_overlay = ActiveOverlay::None;
-      window.focus(&self.focus_handle, cx);
+      self.close_overlay(window, cx);
     } else {
       self.open_finder(window, cx);
     }
@@ -282,60 +208,58 @@ impl Application {
     cx: &mut Context<Self>,
   ) {
     if self.active_overlay == ActiveOverlay::CommandPalette {
-      self.active_overlay = ActiveOverlay::None;
-      window.focus(&self.focus_handle, cx);
+      self.close_overlay(window, cx);
     } else {
-      self.active_overlay = ActiveOverlay::CommandPalette;
-      self.inspector.end_drag();
-      self.camera.drag_last_pos = None;
+      self.prepare_overlay(ActiveOverlay::CommandPalette);
       let items = build_command_items(self.settings);
       self.command_palette.update(cx, |palette, cx| {
-        palette.set_commands(items, cx);
+        palette.set_items(items, cx);
         palette.reset(window, cx);
       });
     }
     cx.notify();
   }
 
+  fn jump_to_type(&mut self, type_id: TypeId, window: &mut Window, cx: &mut Context<Self>) {
+    self.inspector.end_drag();
+    if self.layout.ensure_type_expanded(type_id) {
+      self.selection.hovered_edge = None;
+    }
+    self.selection.select_type(type_id, &self.graph.edges);
+    if let Some(anchor) = self.layout.type_anchor(type_id) {
+      let viewport = window.viewport_size();
+      self.camera.focus_on(anchor, f32::from(viewport.height));
+    }
+    window.focus(&self.focus_handle, cx);
+  }
+
   fn on_finder_event(
     &mut self,
-    _finder: &Entity<TypeFinder>,
-    event: &FinderEvent,
+    _finder: &Entity<FuzzyPalette<TypeId>>,
+    event: &PaletteEvent<TypeId>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     match *event {
-      FinderEvent::SelectType(type_id) => {
+      PaletteEvent::Select(type_id) => {
         self.active_overlay = ActiveOverlay::None;
-        self.inspector.end_drag();
-        self.ensure_type_expanded(type_id);
-        self.selection.select_type(type_id, &self.edges);
-        if let Some(&anchor) = self.type_anchors.get(&type_id) {
-          let viewport = window.viewport_size();
-          self.camera.focus_on(anchor, f32::from(viewport.height));
-        }
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
+        self.jump_to_type(type_id, window, cx);
       }
-      FinderEvent::Close => {
-        self.active_overlay = ActiveOverlay::None;
-        window.focus(&self.focus_handle, cx);
-        cx.notify();
-      }
+      PaletteEvent::Close => self.close_overlay(window, cx),
     }
+    cx.notify();
   }
 
   fn on_command_palette_event(
     &mut self,
-    _palette: &Entity<CommandPalette<AppCommand>>,
-    event: &CommandPaletteEvent<AppCommand>,
+    _palette: &Entity<FuzzyPalette<AppCommand>>,
+    event: &PaletteEvent<AppCommand>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
     match *event {
-      CommandPaletteEvent::RunCommand(cmd) => {
-        self.active_overlay = ActiveOverlay::None;
-        window.focus(&self.focus_handle, cx);
+      PaletteEvent::Select(cmd) => {
+        self.close_overlay(window, cx);
         match cmd {
           AppCommand::ToggleDotGrid => {
             self.settings.show_dot_grid = !self.settings.show_dot_grid;
@@ -357,29 +281,18 @@ impl Application {
             cx.notify();
           }
           AppCommand::ExpandAll => {
-            for crate_node in &mut self.crates {
-              crate_node.collapsed = false;
-              for file_node in &mut crate_node.files {
-                file_node.collapsed = false;
-              }
-            }
-            self.relayout();
+            self.layout.expand_all();
+            self.selection.hovered_edge = None;
             cx.notify();
           }
           AppCommand::CollapseAllFiles => {
-            for crate_node in &mut self.crates {
-              for file_node in &mut crate_node.files {
-                file_node.collapsed = true;
-              }
-            }
-            self.relayout();
+            self.layout.collapse_all_files();
+            self.selection.hovered_edge = None;
             cx.notify();
           }
           AppCommand::CollapseAllCrates => {
-            for crate_node in &mut self.crates {
-              crate_node.collapsed = true;
-            }
-            self.relayout();
+            self.layout.collapse_all_crates();
+            self.selection.hovered_edge = None;
             cx.notify();
           }
           AppCommand::ZoomIn => self.zoom_in(&ZoomIn, window, cx),
@@ -388,59 +301,11 @@ impl Application {
           AppCommand::ClearSelection => self.clear_selection(&ClearSelection, window, cx),
         }
       }
-      CommandPaletteEvent::Close => {
-        self.active_overlay = ActiveOverlay::None;
-        window.focus(&self.focus_handle, cx);
+      PaletteEvent::Close => {
+        self.close_overlay(window, cx);
         cx.notify();
       }
     }
-  }
-
-  fn ensure_type_expanded(&mut self, type_id: TypeId) {
-    let mut changed = false;
-    for crate_node in &mut self.crates {
-      for file_node in &mut crate_node.files {
-        if file_node.types.iter().any(|ty| ty.id == type_id) {
-          if crate_node.collapsed {
-            crate_node.collapsed = false;
-            changed = true;
-          }
-          if file_node.collapsed {
-            file_node.collapsed = false;
-            changed = true;
-          }
-          if changed {
-            self.relayout();
-          }
-          return;
-        }
-      }
-    }
-  }
-
-  fn toggle_crate_collapsed(&mut self, crate_idx: usize) {
-    if let Some(crate_node) = self.crates.get_mut(crate_idx) {
-      crate_node.collapsed = !crate_node.collapsed;
-      self.relayout();
-    }
-  }
-
-  fn toggle_file_collapsed(&mut self, crate_idx: usize, file_idx: usize) {
-    if let Some(file_node) = self
-      .crates
-      .get_mut(crate_idx)
-      .and_then(|c| c.files.get_mut(file_idx))
-    {
-      file_node.collapsed = !file_node.collapsed;
-      self.relayout();
-    }
-  }
-
-  fn relayout(&mut self) {
-    let layout = recompute_layout(&mut self.crates);
-    self.type_anchors = layout.type_anchors;
-    self.collapsed_targets = layout.collapsed_targets;
-    self.selection.hovered_edge = None;
   }
 
   fn on_file_card_event(
@@ -452,13 +317,17 @@ impl Application {
     window.focus(&self.focus_handle, cx);
     match event {
       FileCardEvent::SelectType(id) => {
-        self.selection.toggle_type(id, &self.edges);
+        self.selection.toggle_type(id, &self.graph.edges);
       }
       FileCardEvent::ToggleCrate(crate_idx) => {
-        self.toggle_crate_collapsed(crate_idx);
+        if self.layout.toggle_crate(crate_idx) {
+          self.selection.hovered_edge = None;
+        }
       }
       FileCardEvent::ToggleFile(crate_idx, file_idx) => {
-        self.toggle_file_collapsed(crate_idx, file_idx);
+        if self.layout.toggle_file(crate_idx, file_idx) {
+          self.selection.hovered_edge = None;
+        }
       }
     }
     cx.notify();
@@ -480,9 +349,7 @@ impl Application {
           .start_drag(cursor, f32::from(viewport.width), f32::from(viewport.height));
       }
       InspectorEvent::SelectType(id) => {
-        window.focus(&self.focus_handle, cx);
-        self.inspector.end_drag();
-        self.selection.select_type(id, &self.edges);
+        self.jump_to_type(id, window, cx);
       }
       InspectorEvent::Close => {
         self.inspector.end_drag();
@@ -531,19 +398,13 @@ impl Application {
     cx: &mut Context<Self>,
   ) {
     window.focus(&self.focus_handle, cx);
-    let pos = point2(f32::from(event.position.x), f32::from(event.position.y));
+    let pos = to_point2(event.position);
 
     if self.settings.show_edges
       && event.button == MouseButton::Left
-      && let Some(edge_id) = hit_test_edge(
-        &self.edges,
-        &self.type_anchors,
-        &self.collapsed_targets,
-        &self.directed_pairs,
-        self.camera.pan,
-        self.camera.zoom,
-        pos,
-      )
+      && let Some(edge_id) = self
+        .layout
+        .hit_test_edge(&self.graph, self.camera.pan, self.camera.zoom, pos)
     {
       self.selection.toggle_edge(edge_id);
       cx.notify();
@@ -563,7 +424,11 @@ impl Application {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    let current = point2(f32::from(event.position.x), f32::from(event.position.y));
+    if self.active_overlay != ActiveOverlay::None {
+      return;
+    }
+
+    let current = to_point2(event.position);
 
     if self.inspector.is_dragging() {
       let viewport = window.viewport_size();
@@ -583,15 +448,9 @@ impl Application {
       self.camera.drag_last_pos = Some(current);
       cx.notify();
     } else if self.settings.show_edges {
-      let hovered = hit_test_edge(
-        &self.edges,
-        &self.type_anchors,
-        &self.collapsed_targets,
-        &self.directed_pairs,
-        self.camera.pan,
-        self.camera.zoom,
-        current,
-      );
+      let hovered = self
+        .layout
+        .hit_test_edge(&self.graph, self.camera.pan, self.camera.zoom, current);
       if hovered != self.selection.hovered_edge {
         self.selection.hovered_edge = hovered;
         cx.notify();
@@ -614,8 +473,7 @@ impl Application {
 
     if event.modifiers.platform || event.modifiers.control {
       let factor = (1.0 + dy * 0.004).clamp(0.75, 1.25);
-      let cursor = point2(f32::from(event.position.x), f32::from(event.position.y));
-      self.set_zoom_around(self.camera.zoom * factor, cursor, window, cx);
+      self.set_zoom_around(self.camera.zoom * factor, to_point2(event.position), window, cx);
     } else {
       self.camera.pan.x += dx;
       self.camera.pan.y += dy;
@@ -627,7 +485,7 @@ impl Application {
 impl Render for Application {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let viewport = window.viewport_size();
-    let viewport_rect = ViewportRect::from_size(
+    let viewport_rect = Rect::from_viewport(
       f32::from(viewport.width),
       f32::from(viewport.height),
       VIEWPORT_OVERSCAN_X_PX,
@@ -641,8 +499,8 @@ impl Render for Application {
       .show_dot_grid
       .then(|| ui::background::render_dot_grid(self.camera));
     let file_cards = ui::file_card::render_visible_file_cards(
-      &self.crates,
-      &self.edges,
+      &self.graph,
+      &self.layout,
       self.camera,
       &self.selection,
       viewport_rect,
@@ -651,10 +509,8 @@ impl Render for Application {
     );
     let edges_layer = self.settings.show_edges.then(|| {
       ui::edges::render_edges_layer(
-        &self.edges,
-        &self.type_anchors,
-        &self.collapsed_targets,
-        &self.directed_pairs,
+        &self.graph,
+        &self.layout,
         self.camera,
         &self.selection,
         viewport_rect,
@@ -662,9 +518,7 @@ impl Render for Application {
     });
     let inspector_panel = ui::inspector::render_inspector_panel(
       &self.canonical_root,
-      &self.types,
-      &self.functions,
-      &self.edges,
+      &self.graph,
       &self.selection,
       &self.inspector,
       viewport,
@@ -731,8 +585,7 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
       KeyBinding::new("cmd-0", ResetZoom, None),
       KeyBinding::new("escape", ClearSelection, None),
     ]);
-    finder::bind_keys(cx);
-    command_palette::bind_keys(cx);
+    palette::bind_keys(cx);
 
     cx.on_window_closed(|cx, _window_id| {
       if cx.windows().is_empty() {
@@ -741,8 +594,7 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
     })
     .detach();
 
-    let canonical_root =
-      std::fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
+    let canonical_root = canonicalize_or_keep(&workspace_root);
     let window_title = workspace_title(&canonical_root);
     let bounds = Bounds::centered(None, size(px(1080.0), px(760.0)), cx);
     if let Err(err) = cx.open_window(
@@ -756,7 +608,7 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
         ..Default::default()
       },
       |window, cx| {
-        let view = cx.new(|cx| Application::new(workspace_root, graph, window, cx));
+        let view = cx.new(|cx| Application::new(canonical_root, graph, window, cx));
         let focus = view.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         view

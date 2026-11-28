@@ -1,10 +1,9 @@
 [package]
-name = "command_palette"
+name = "palette"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-finder.workspace = true
 gpui.workspace = true
 
 [lints]

@@ -4,14 +4,13 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-command_palette.workspace = true
-finder.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 graph.workspace = true
 layout.workspace = true
 lsp.workspace = true
 macros.workspace = true
+palette.workspace = true
 state.workspace = true
 ui.workspace = true
 

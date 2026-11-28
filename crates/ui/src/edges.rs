@@ -1,11 +1,9 @@
-use std::collections::{HashMap, HashSet};
-
 use gpui::{
   Bounds, PathBuilder, Point, Rgba, Window, canvas, fill, point, prelude::*, px, rgba, size,
 };
-use graph::{GraphEdge, TypeId};
+use graph::Graph;
 use layout::metrics::EDGE_CULL_PADDING_PX;
-use layout::{CollapsedTarget, EdgeCurve, Point2, ViewportRect, iter_edge_curves, point2};
+use layout::{EdgeCurve, Rect, WorkspaceLayout, arrow_len};
 use state::{Camera, Selection};
 
 #[derive(Clone, Copy)]
@@ -89,13 +87,11 @@ impl EdgeBatch {
 }
 
 pub fn render_edges_layer(
-  edges: &[GraphEdge],
-  type_anchors: &HashMap<TypeId, Point2>,
-  collapsed_targets: &HashMap<TypeId, CollapsedTarget>,
-  directed_pairs: &HashSet<(TypeId, TypeId)>,
+  graph: &Graph,
+  layout: &WorkspaceLayout,
   camera: Camera,
   selection: &Selection,
-  viewport_rect: ViewportRect,
+  viewport_rect: Rect,
 ) -> impl IntoElement {
   let zoom = camera.zoom;
   let selected_type = selection.selected_type;
@@ -103,35 +99,32 @@ pub fn render_edges_layer(
   let hovered_edge_id = selection.hovered_edge;
 
   let edge_cull_padding = EDGE_CULL_PADDING_PX * zoom.max(1.0);
-  let styled_curves: Vec<(EdgeCurve, EdgeHighlight)> = iter_edge_curves(
-    edges,
-    type_anchors,
-    collapsed_targets,
-    directed_pairs,
-    camera.pan,
-    zoom,
-    point2(0.0, 0.0),
-    Some((viewport_rect, edge_cull_padding)),
-  )
-  .filter_map(|curve| {
-    let edge = edges.get(curve.edge_id.0)?;
-    let highlight = if selected_edge_id == Some(edge.id) {
-      EdgeHighlight::Selected
-    } else if hovered_edge_id == Some(edge.id) {
-      EdgeHighlight::Hovered
-    } else if selected_edge_id.is_some() {
-      EdgeHighlight::Dimmed
-    } else {
-      match selected_type {
-        None => EdgeHighlight::Normal,
-        Some(sel) if edge.from == sel => EdgeHighlight::Outgoing,
-        Some(sel) if edge.to == sel => EdgeHighlight::Incoming,
-        Some(_) => EdgeHighlight::Dimmed,
-      }
-    };
-    Some((curve, highlight))
-  })
-  .collect();
+  let styled_curves: Vec<(EdgeCurve, EdgeHighlight)> = layout
+    .iter_edge_curves(
+      graph,
+      camera.pan,
+      zoom,
+      Some((viewport_rect, edge_cull_padding)),
+    )
+    .filter_map(|curve| {
+      let edge = graph.edge(curve.edge_id)?;
+      let highlight = if selected_edge_id == Some(edge.id) {
+        EdgeHighlight::Selected
+      } else if hovered_edge_id == Some(edge.id) {
+        EdgeHighlight::Hovered
+      } else if selected_edge_id.is_some() {
+        EdgeHighlight::Dimmed
+      } else {
+        match selected_type {
+          None => EdgeHighlight::Normal,
+          Some(sel) if edge.from == sel => EdgeHighlight::Outgoing,
+          Some(sel) if edge.to == sel => EdgeHighlight::Incoming,
+          Some(_) => EdgeHighlight::Dimmed,
+        }
+      };
+      Some((curve, highlight))
+    })
+    .collect();
 
   canvas(
     |_bounds, _window, _cx| {},
@@ -144,8 +137,8 @@ pub fn render_edges_layer(
       let normal_width = (1.5 * zoom).clamp(1.0, 3.0);
       let highlight_width = (2.4 * zoom).clamp(1.5, 4.5);
       let selected_width = (3.0 * zoom).clamp(2.0, 5.5);
-      let arrow_len = (7.0 * zoom).clamp(4.0, 12.0);
-      let arrow_half = (3.5 * zoom).clamp(2.0, 6.0);
+      let arrow_length = arrow_len(zoom);
+      let arrow_half = arrow_length * 0.5;
       let dot_size = (5.0 * zoom).clamp(3.0, 8.0);
 
       let mut dimmed = EdgeBatch::new(normal_width, false);
@@ -164,7 +157,7 @@ pub fn render_edges_layer(
           EdgeHighlight::Hovered => &mut hovered,
           EdgeHighlight::Selected => &mut selected,
         };
-        batch.push(curve, origin, arrow_len, arrow_half);
+        batch.push(curve, origin, arrow_length, arrow_half);
       }
 
       dimmed.paint(window, dot_size, rgba(0x7dd3fc12), rgba(0x7dd3fc24));

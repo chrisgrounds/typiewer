@@ -3,7 +3,7 @@ use gpui::{
   MouseButton, ScrollHandle, SharedString, Window, div, point, prelude::*, px, rgb, rgba,
 };
 
-use crate::actions::ClosePalette;
+use crate::ClosePalette;
 use crate::fuzzy::fuzzy_match;
 
 const MONO_FONT: &str = "Menlo";
@@ -16,12 +16,40 @@ pub enum PaletteEvent<T> {
   Close,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BadgeTone {
+  Sky,
+  Emerald,
+  Amber,
+  Purple,
+  Slate,
+}
+
+impl BadgeTone {
+  pub const fn colors(self) -> (u32, u32, u32) {
+    match self {
+      Self::Sky => (0x38bdf822, 0x38bdf844, 0x7dd3fc),
+      Self::Emerald => (0x34d39922, 0x34d39944, 0x6ee7b7),
+      Self::Amber => (0xfbbf2422, 0xfbbf2444, 0xfde68a),
+      Self::Purple => (0xc084fc22, 0xc084fc44, 0xd8b4fe),
+      Self::Slate => (0x94a3b822, 0x94a3b844, 0xcbd5e1),
+    }
+  }
+}
+
 #[derive(Clone, Debug)]
 pub struct PaletteBadge {
-  pub label: String,
-  pub bg_rgba: u32,
-  pub border_rgba: u32,
-  pub fg_rgb: u32,
+  pub label: SharedString,
+  pub tone: BadgeTone,
+}
+
+impl PaletteBadge {
+  pub fn new(label: impl Into<SharedString>, tone: BadgeTone) -> Self {
+    Self {
+      label: label.into(),
+      tone,
+    }
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -84,17 +112,19 @@ impl<T: Clone + 'static> FuzzyPalette<T> {
 
   pub fn set_items(&mut self, items: Vec<PaletteItem<T>>, cx: &mut Context<Self>) {
     self.items = items;
-    self.recompute_matches();
-    self.scroll_handle.scroll_to_item(0);
-    cx.notify();
+    self.refresh_results(cx);
   }
 
   pub fn reset(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.query.clear();
     self.selected_index = 0;
+    self.refresh_results(cx);
+    window.focus(&self.focus_handle, cx);
+  }
+
+  fn refresh_results(&mut self, cx: &mut Context<Self>) {
     self.recompute_matches();
     self.scroll_handle.scroll_to_item(0);
-    window.focus(&self.focus_handle, cx);
     cx.notify();
   }
 
@@ -214,11 +244,7 @@ impl<T: Clone + 'static> FuzzyPalette<T> {
       }
       "tab" => {
         cx.stop_propagation();
-        if mods.shift {
-          self.move_selection(-1, cx);
-        } else {
-          self.move_selection(1, cx);
-        }
+        self.move_selection(if mods.shift { -1 } else { 1 }, cx);
       }
       "n" if mods.control => {
         cx.stop_propagation();
@@ -232,10 +258,6 @@ impl<T: Clone + 'static> FuzzyPalette<T> {
         cx.stop_propagation();
         self.confirm_selection(cx);
       }
-      "escape" => {
-        cx.stop_propagation();
-        cx.emit(PaletteEvent::Close);
-      }
       "backspace" => {
         cx.stop_propagation();
         if mods.platform {
@@ -245,23 +267,17 @@ impl<T: Clone + 'static> FuzzyPalette<T> {
         } else {
           self.query.pop();
         }
-        self.recompute_matches();
-        self.scroll_handle.scroll_to_item(0);
-        cx.notify();
+        self.refresh_results(cx);
       }
       "u" if mods.control => {
         cx.stop_propagation();
         self.query.clear();
-        self.recompute_matches();
-        self.scroll_handle.scroll_to_item(0);
-        cx.notify();
+        self.refresh_results(cx);
       }
       "w" if mods.control => {
         cx.stop_propagation();
         self.delete_last_word();
-        self.recompute_matches();
-        self.scroll_handle.scroll_to_item(0);
-        cx.notify();
+        self.refresh_results(cx);
       }
       _ => {
         if !mods.platform
@@ -272,9 +288,7 @@ impl<T: Clone + 'static> FuzzyPalette<T> {
         {
           cx.stop_propagation();
           self.query.push_str(key_char);
-          self.recompute_matches();
-          self.scroll_handle.scroll_to_item(0);
-          cx.notify();
+          self.refresh_results(cx);
         }
       }
     }
@@ -400,18 +414,19 @@ impl<T: Clone + 'static> Render for FuzzyPalette<T> {
                 .gap(px(8.0))
                 .min_w_0()
                 .when_some(item.badge.as_ref(), |el, badge| {
+                  let (bg_rgba, border_rgba, fg_rgb) = badge.tone.colors();
                   el.child(
                     div()
                       .px(px(6.0))
                       .py(px(1.5))
                       .rounded(px(4.0))
-                      .bg(rgba(badge.bg_rgba))
+                      .bg(rgba(bg_rgba))
                       .border_1()
-                      .border_color(rgba(badge.border_rgba))
+                      .border_color(rgba(border_rgba))
                       .font_family(MONO_FONT)
                       .text_size(px(10.0))
-                      .text_color(rgb(badge.fg_rgb))
-                      .child(SharedString::from(badge.label.clone())),
+                      .text_color(rgb(fg_rgb))
+                      .child(badge.label.clone()),
                   )
                 })
                 .child(render_highlighted_title(

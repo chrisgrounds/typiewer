@@ -1,5 +1,10 @@
-use layout::metrics::{BASE_REM_SIZE, DEFAULT_PAN_X, DEFAULT_PAN_Y, MAX_ZOOM, MIN_ZOOM};
+use layout::metrics::BASE_REM_SIZE;
 use layout::{Point2, point2};
+
+pub const MIN_ZOOM: f32 = 0.25;
+pub const MAX_ZOOM: f32 = 3.0;
+pub const DEFAULT_PAN_X: f32 = 300.0;
+pub const DEFAULT_PAN_Y: f32 = 56.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Camera {

@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::fmt;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use lsp::{LspClient, Position};
 
@@ -13,14 +16,58 @@ pub struct FunctionId(pub usize);
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct EdgeId(pub usize);
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum TypeKind {
+  Struct,
+  Enum,
+  Trait,
+  Type,
+}
+
+impl TypeKind {
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::Struct => "struct",
+      Self::Enum => "enum",
+      Self::Trait => "trait",
+      Self::Type => "type",
+    }
+  }
+}
+
+impl fmt::Display for TypeKind {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct TypeNode {
   pub id: TypeId,
   pub name: String,
-  pub kind: String,
+  pub kind: TypeKind,
   pub body: String,
   pub file_path: PathBuf,
   pub position: Position,
+}
+
+/// Lightweight locator for a `TypeNode` used during LSP edge resolution so the
+/// background resolver doesn't need to clone full type bodies.
+#[derive(Debug, Clone)]
+pub struct TypeRef {
+  pub id: TypeId,
+  pub file_path: PathBuf,
+  pub position: Position,
+}
+
+impl From<&TypeNode> for TypeRef {
+  fn from(node: &TypeNode) -> Self {
+    Self {
+      id: node.id,
+      file_path: node.file_path.clone(),
+      position: node.position,
+    }
+  }
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +113,7 @@ pub struct Graph {
   pub types: Vec<TypeNode>,
   pub functions: Vec<FunctionInfo>,
   pub edges: Vec<GraphEdge>,
+  pub directed_pairs: HashSet<(TypeId, TypeId)>,
 }
 
 impl Graph {
@@ -74,28 +122,51 @@ impl Graph {
       types,
       functions,
       edges: Vec::new(),
+      directed_pairs: HashSet::new(),
     }
   }
 
-  pub fn resolve_edges(
-    types: &[TypeNode],
-    functions: &[FunctionInfo],
-    lsp: &LspClient,
-  ) -> GraphResolution {
-    resolver::resolve_edges(types, functions, lsp)
+  pub fn new(types: Vec<TypeNode>, functions: Vec<FunctionInfo>, lsp: &LspClient) -> Self {
+    let type_refs: Vec<TypeRef> = types.iter().map(TypeRef::from).collect();
+    let resolution = resolver::resolve_edges(&type_refs, functions, lsp);
+    let mut graph = Self::from_parsed(types, Vec::new());
+    graph.apply_resolution(resolution);
+    graph
   }
 
-  pub fn new(
-    types: Vec<TypeNode>,
-    functions: Vec<FunctionInfo>,
-    lsp: &LspClient,
-  ) -> lsp::Result<Self> {
-    let mut graph = Self::from_parsed(types, functions);
-    let resolution = Self::resolve_edges(&graph.types, &graph.functions, lsp);
-    graph.edges = resolution.edges;
-    graph.functions = resolution.functions;
-    Ok(graph)
+  pub fn apply_resolution(&mut self, resolution: GraphResolution) {
+    self.directed_pairs = resolution.edges.iter().map(|e| (e.from, e.to)).collect();
+    self.edges = resolution.edges;
+    self.functions = resolution.functions;
   }
+
+  pub fn type_refs(&self) -> Vec<TypeRef> {
+    self.types.iter().map(TypeRef::from).collect()
+  }
+
+  pub fn ty(&self, id: TypeId) -> Option<&TypeNode> {
+    self.types.get(id.0)
+  }
+
+  pub fn func(&self, id: FunctionId) -> Option<&FunctionInfo> {
+    self.functions.get(id.0)
+  }
+
+  pub fn edge(&self, id: EdgeId) -> Option<&GraphEdge> {
+    self.edges.get(id.0)
+  }
+}
+
+pub fn canonicalize_or_keep(path: &Path) -> PathBuf {
+  fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub fn relative_display_path(canonical_root: &Path, path: &Path) -> String {
+  path
+    .strip_prefix(canonical_root)
+    .unwrap_or(path)
+    .display()
+    .to_string()
 }
 
 fn collapse_whitespace(text: &str) -> String {

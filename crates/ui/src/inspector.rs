@@ -1,14 +1,16 @@
 use std::path::Path;
 
 use gpui::{
-  AnyElement, BoxShadow, Context, FontWeight, MouseButton, MouseDownEvent, Pixels, Size, Window,
-  div, point, prelude::*, px, rgb, rgba,
+  AnyElement, BoxShadow, Context, FontWeight, MouseButton, MouseDownEvent, Pixels, SharedString,
+  Size, Window, div, point, prelude::*, px, rgb, rgba,
 };
-use graph::{FunctionInfo, GraphEdge, TypeId, TypeNode};
-use layout::{Point2, point2};
+use graph::{FunctionId, Graph, TypeId, relative_display_path};
+use layout::Point2;
 use state::{INSPECTOR_WIDTH, InspectorState, Selection};
 
-use crate::theme::MONO_FONT;
+use crate::theme::{
+  AMBER_TEXT, EMERALD_TEXT, GRAY_500, MONO_FONT, SKY_TEXT, SLATE_400, pluralize, to_point2,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum InspectorEvent {
@@ -17,13 +19,33 @@ pub enum InspectorEvent {
   Close,
 }
 
-fn relative_display_path(canonical_root: &Path, path: &Path) -> String {
-  path
-    .strip_prefix(canonical_root)
-    .unwrap_or(path)
-    .display()
-    .to_string()
+#[derive(Clone, Copy)]
+struct PillSpec {
+  heading: &'static str,
+  id_prefix: &'static str,
+  bg: u32,
+  border: u32,
+  hover_bg: u32,
+  fg: u32,
 }
+
+const INPUT_PILLS: PillSpec = PillSpec {
+  heading: "Inputs:",
+  id_prefix: "inspector-in",
+  bg: 0x38bdf820,
+  border: 0x38bdf844,
+  hover_bg: 0x38bdf838,
+  fg: SKY_TEXT,
+};
+
+const OUTPUT_PILLS: PillSpec = PillSpec {
+  heading: "Outputs:",
+  id_prefix: "inspector-out",
+  bg: 0x34d39920,
+  border: 0x34d39944,
+  hover_bg: 0x34d39938,
+  fg: EMERALD_TEXT,
+};
 
 fn render_drag_grip() -> impl IntoElement {
   let dot = || {
@@ -52,57 +74,121 @@ fn render_drag_grip() -> impl IntoElement {
     .child(col())
 }
 
-#[allow(clippy::too_many_arguments)]
+fn render_header_type_badge<V: 'static>(
+  id: &'static str,
+  type_id: TypeId,
+  name: String,
+  bg_rgba: u32,
+  fg_rgb: u32,
+  cx: &mut Context<V>,
+  on_event: impl Fn(&mut V, InspectorEvent, &mut Window, &mut Context<V>) + Copy + 'static,
+) -> AnyElement {
+  div()
+    .id(id)
+    .cursor_pointer()
+    .px(px(7.0))
+    .py(px(2.0))
+    .rounded(px(5.0))
+    .bg(rgba(bg_rgba))
+    .text_size(px(12.0))
+    .font_weight(FontWeight::MEDIUM)
+    .text_color(rgb(fg_rgb))
+    .on_mouse_down(
+      MouseButton::Left,
+      cx.listener(move |this, _, window, cx| {
+        cx.stop_propagation();
+        on_event(this, InspectorEvent::SelectType(type_id), window, cx);
+      }),
+    )
+    .child(name)
+    .into_any_element()
+}
+
+fn render_pill_row<V: 'static>(
+  spec: PillSpec,
+  func_id: FunctionId,
+  type_ids: &[TypeId],
+  graph: &Graph,
+  cx: &mut Context<V>,
+  on_event: impl Fn(&mut V, InspectorEvent, &mut Window, &mut Context<V>) + Copy + 'static,
+) -> Option<AnyElement> {
+  let pills: Vec<(TypeId, String)> = type_ids
+    .iter()
+    .filter_map(|&tid| graph.ty(tid).map(|t| (tid, format!("{} {}", t.kind, t.name))))
+    .collect();
+
+  if pills.is_empty() {
+    return None;
+  }
+
+  Some(
+    div()
+      .flex()
+      .flex_wrap()
+      .items_center()
+      .gap(px(6.0))
+      .child(
+        div()
+          .text_size(px(11.0))
+          .text_color(rgb(SLATE_400))
+          .child(spec.heading),
+      )
+      .children(pills.into_iter().map(|(tid, label)| {
+        div()
+          .id(SharedString::from(format!(
+            "{}:{}:{}",
+            spec.id_prefix, func_id.0, tid.0
+          )))
+          .cursor_pointer()
+          .px(px(8.0))
+          .py(px(2.0))
+          .rounded(px(6.0))
+          .bg(rgba(spec.bg))
+          .border_1()
+          .border_color(rgba(spec.border))
+          .text_size(px(11.0))
+          .text_color(rgb(spec.fg))
+          .hover(move |el| el.bg(rgba(spec.hover_bg)))
+          .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| {
+              cx.stop_propagation();
+              on_event(this, InspectorEvent::SelectType(tid), window, cx);
+            }),
+          )
+          .child(label)
+      }))
+      .into_any_element(),
+  )
+}
+
 pub fn render_inspector_panel<V: 'static>(
   canonical_root: &Path,
-  types: &[TypeNode],
-  functions: &[FunctionInfo],
-  edges: &[GraphEdge],
+  graph: &Graph,
   selection: &Selection,
   inspector: &InspectorState,
   viewport: Size<Pixels>,
   cx: &mut Context<V>,
   on_event: impl Fn(&mut V, InspectorEvent, &mut Window, &mut Context<V>) + Copy + 'static,
 ) -> Option<AnyElement> {
-  let edge = selection.selected_edge.and_then(|id| edges.get(id.0))?;
-  let from_type = types.get(edge.from.0)?;
-  let to_type = types.get(edge.to.0)?;
-  let fn_count = edge.functions.len();
-  let count_label = if fn_count == 1 {
-    "1 function".to_owned()
-  } else {
-    format!("{fn_count} functions")
-  };
+  let edge = selection.selected_edge.and_then(|id| graph.edge(id))?;
+  let from_type = graph.ty(edge.from)?;
+  let to_type = graph.ty(edge.to)?;
+  let count_label = pluralize(edge.functions.len(), "function", "functions");
 
   let function_cards: Vec<_> = edge
     .functions
     .iter()
-    .filter_map(|fid| functions.get(fid.0))
+    .filter_map(|&fid| graph.func(fid))
     .map(|func| {
-      let sig = func.signature();
       let location = format!(
         "{}:{}",
         relative_display_path(canonical_root, &func.file_path),
         func.position.line + 1
       );
-      let input_pills: Vec<(TypeId, String)> = func
-        .input_types
-        .iter()
-        .filter_map(|tid| {
-          types
-            .get(tid.0)
-            .map(|t| (*tid, format!("{} {}", t.kind, t.name)))
-        })
-        .collect();
-      let output_pills: Vec<(TypeId, String)> = func
-        .output_types
-        .iter()
-        .filter_map(|tid| {
-          types
-            .get(tid.0)
-            .map(|t| (*tid, format!("{} {}", t.kind, t.name)))
-        })
-        .collect();
+      let input_row = render_pill_row(INPUT_PILLS, func.id, &func.input_types, graph, cx, on_event);
+      let output_row =
+        render_pill_row(OUTPUT_PILLS, func.id, &func.output_types, graph, cx, on_event);
 
       div()
         .flex()
@@ -123,13 +209,13 @@ pub fn render_inspector_panel<V: 'static>(
               div()
                 .text_size(px(14.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(rgb(0xfde68a))
+                .text_color(rgb(AMBER_TEXT))
                 .child(format!("fn {}", func.name)),
             )
             .child(
               div()
                 .text_size(px(11.0))
-                .text_color(rgb(0x6b7280))
+                .text_color(rgb(GRAY_500))
                 .child(location),
             ),
         )
@@ -144,87 +230,13 @@ pub fn render_inspector_panel<V: 'static>(
             .font_family(MONO_FONT)
             .text_size(px(12.0))
             .text_color(rgb(0xe2e8f0))
-            .child(sig),
+            .child(func.signature()),
         )
-        .when(!input_pills.is_empty(), |el| {
-          el.child(
-            div()
-              .flex()
-              .flex_wrap()
-              .items_center()
-              .gap(px(6.0))
-              .child(
-                div()
-                  .text_size(px(11.0))
-                  .text_color(rgb(0x94a3b8))
-                  .child("Inputs:"),
-              )
-              .children(input_pills.into_iter().map(|(tid, label)| {
-                div()
-                  .id(("inspector-in", func.id.0 * 65_536 + tid.0))
-                  .cursor_pointer()
-                  .px(px(8.0))
-                  .py(px(2.0))
-                  .rounded(px(6.0))
-                  .bg(rgba(0x38bdf820))
-                  .border_1()
-                  .border_color(rgba(0x38bdf844))
-                  .text_size(px(11.0))
-                  .text_color(rgb(0x7dd3fc))
-                  .hover(|el| el.bg(rgba(0x38bdf838)))
-                  .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                      cx.stop_propagation();
-                      on_event(this, InspectorEvent::SelectType(tid), window, cx);
-                    }),
-                  )
-                  .child(label)
-              })),
-          )
-        })
-        .when(!output_pills.is_empty(), |el| {
-          el.child(
-            div()
-              .flex()
-              .flex_wrap()
-              .items_center()
-              .gap(px(6.0))
-              .child(
-                div()
-                  .text_size(px(11.0))
-                  .text_color(rgb(0x94a3b8))
-                  .child("Outputs:"),
-              )
-              .children(output_pills.into_iter().map(|(tid, label)| {
-                div()
-                  .id(("inspector-out", func.id.0 * 65_536 + tid.0))
-                  .cursor_pointer()
-                  .px(px(8.0))
-                  .py(px(2.0))
-                  .rounded(px(6.0))
-                  .bg(rgba(0x34d39920))
-                  .border_1()
-                  .border_color(rgba(0x34d39944))
-                  .text_size(px(11.0))
-                  .text_color(rgb(0x6ee7b7))
-                  .hover(|el| el.bg(rgba(0x34d39938)))
-                  .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                      cx.stop_propagation();
-                      on_event(this, InspectorEvent::SelectType(tid), window, cx);
-                    }),
-                  )
-                  .child(label)
-              })),
-          )
-        })
+        .when_some(input_row, |el, row| el.child(row))
+        .when_some(output_row, |el, row| el.child(row))
     })
     .collect();
 
-  let from_id = from_type.id;
-  let to_id = to_type.id;
   let is_dragging = inspector.is_dragging();
   let panel_pos = inspector.resolved_position(f32::from(viewport.width), f32::from(viewport.height));
 
@@ -278,8 +290,12 @@ pub fn render_inspector_panel<V: 'static>(
             MouseButton::Left,
             cx.listener(move |this, event: &MouseDownEvent, window, cx| {
               cx.stop_propagation();
-              let cursor = point2(f32::from(event.position.x), f32::from(event.position.y));
-              on_event(this, InspectorEvent::StartDrag(cursor), window, cx);
+              on_event(
+                this,
+                InspectorEvent::StartDrag(to_point2(event.position)),
+                window,
+                cx,
+              );
             }),
           )
           .child(
@@ -289,56 +305,34 @@ pub fn render_inspector_panel<V: 'static>(
               .items_center()
               .gap(px(6.0))
               .child(render_drag_grip())
-              .child(
-                div()
-                  .id("inspector-from-type")
-                  .cursor_pointer()
-                  .px(px(7.0))
-                  .py(px(2.0))
-                  .rounded(px(5.0))
-                  .bg(rgba(0x38bdf822))
-                  .text_size(px(12.0))
-                  .font_weight(FontWeight::MEDIUM)
-                  .text_color(rgb(0x7dd3fc))
-                  .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                      cx.stop_propagation();
-                      on_event(this, InspectorEvent::SelectType(from_id), window, cx);
-                    }),
-                  )
-                  .child(from_type.name.clone()),
-              )
+              .child(render_header_type_badge(
+                "inspector-from-type",
+                from_type.id,
+                from_type.name.clone(),
+                0x38bdf822,
+                SKY_TEXT,
+                cx,
+                on_event,
+              ))
               .child(
                 div()
                   .text_size(px(12.0))
                   .text_color(rgb(0xfbbf24))
                   .child("→"),
               )
-              .child(
-                div()
-                  .id("inspector-to-type")
-                  .cursor_pointer()
-                  .px(px(7.0))
-                  .py(px(2.0))
-                  .rounded(px(5.0))
-                  .bg(rgba(0x34d39922))
-                  .text_size(px(12.0))
-                  .font_weight(FontWeight::MEDIUM)
-                  .text_color(rgb(0x6ee7b7))
-                  .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _, window, cx| {
-                      cx.stop_propagation();
-                      on_event(this, InspectorEvent::SelectType(to_id), window, cx);
-                    }),
-                  )
-                  .child(to_type.name.clone()),
-              )
+              .child(render_header_type_badge(
+                "inspector-to-type",
+                to_type.id,
+                to_type.name.clone(),
+                0x34d39922,
+                EMERALD_TEXT,
+                cx,
+                on_event,
+              ))
               .child(
                 div()
                   .text_size(px(11.0))
-                  .text_color(rgb(0x94a3b8))
+                  .text_color(rgb(SLATE_400))
                   .child(format!("· {count_label}")),
               ),
           )
@@ -350,7 +344,7 @@ pub fn render_inspector_panel<V: 'static>(
               .py(px(2.0))
               .rounded(px(5.0))
               .text_size(px(14.0))
-              .text_color(rgb(0x94a3b8))
+              .text_color(rgb(SLATE_400))
               .hover(|el| el.bg(rgba(0xffffff14)).text_color(rgb(0xf8fafc)))
               .on_mouse_down(
                 MouseButton::Left,

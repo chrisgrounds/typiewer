@@ -1,9 +1,5 @@
-// Camera & zoom constants.
+// Shared base rem size (pixels at 1.0 zoom).
 pub const BASE_REM_SIZE: f32 = 16.0;
-pub const MIN_ZOOM: f32 = 0.25;
-pub const MAX_ZOOM: f32 = 3.0;
-pub const DEFAULT_PAN_X: f32 = 300.0;
-pub const DEFAULT_PAN_Y: f32 = 56.0;
 
 // Layout constants in `rems` (shared between `layout` and `ui` so edge anchors align).
 pub const CRATE_HEADER_PAD_Y_REM: f32 = 0.625;

@@ -1,44 +1,42 @@
-use std::collections::{HashMap, HashSet};
+use graph::{EdgeId, Graph};
 
-use graph::{EdgeId, GraphEdge, TypeId};
-
-use crate::file_layout::CollapsedTarget;
-use crate::geometry::{EdgeCurve, Point2, ViewportRect, min_dist_sq_to_cubic_bezier, point2};
+use crate::file_layout::WorkspaceLayout;
+use crate::geometry::{EdgeCurve, Point2, Rect, min_dist_sq_to_cubic_bezier, point2};
 use crate::metrics::EDGE_HIT_SEGMENTS;
 
-#[allow(clippy::too_many_arguments)]
+pub fn arrow_len(zoom: f32) -> f32 {
+  (7.0 * zoom).clamp(4.0, 12.0)
+}
+
 pub fn iter_edge_curves<'a>(
-  edges: &'a [GraphEdge],
-  type_anchors: &'a HashMap<TypeId, Point2>,
-  collapsed_targets: &'a HashMap<TypeId, CollapsedTarget>,
-  directed_pairs: &'a HashSet<(TypeId, TypeId)>,
+  graph: &'a Graph,
+  layout: &'a WorkspaceLayout,
   pan: Point2,
   zoom: f32,
-  origin: Point2,
-  cull_rect: Option<(ViewportRect, f32)>,
+  cull_rect: Option<(Rect, f32)>,
 ) -> impl Iterator<Item = EdgeCurve> + 'a {
-  let arrow_len = (7.0 * zoom).clamp(4.0, 12.0);
+  let tip_inset = arrow_len(zoom) * 0.5;
 
-  edges.iter().filter_map(move |edge| {
+  graph.edges.iter().filter_map(move |edge| {
     if let (Some(from_target), Some(to_target)) = (
-      collapsed_targets.get(&edge.from),
-      collapsed_targets.get(&edge.to),
+      layout.collapsed_targets.get(&edge.from),
+      layout.collapsed_targets.get(&edge.to),
     ) && from_target == to_target
     {
       return None;
     }
 
-    let from = *type_anchors.get(&edge.from)?;
-    let to = *type_anchors.get(&edge.to)?;
+    let from = *layout.type_anchors.get(&edge.from)?;
+    let to = *layout.type_anchors.get(&edge.to)?;
 
-    let from_x = origin.x + from.x * zoom + pan.x;
-    let from_y = origin.y + from.y * zoom + pan.y;
-    let to_x = origin.x + to.x * zoom + pan.x;
-    let to_y = origin.y + to.y * zoom + pan.y;
+    let from_x = from.x * zoom + pan.x;
+    let from_y = from.y * zoom + pan.y;
+    let to_x = to.x * zoom + pan.x;
+    let to_y = to.y * zoom + pan.y;
 
     let dy = (to_y - from_y).abs();
     let bidirectional_offset =
-      if directed_pairs.contains(&(edge.to, edge.from)) && edge.from > edge.to {
+      if graph.directed_pairs.contains(&(edge.to, edge.from)) && edge.from > edge.to {
         34.0 * zoom
       } else {
         0.0
@@ -50,15 +48,14 @@ pub fn iter_edge_curves<'a>(
       p0: point2(from_x, from_y),
       c1: point2(from_x - arc, from_y),
       c2: point2(to_x - arc, to_y),
-      p3: point2(to_x - arrow_len * 0.5, to_y),
+      p3: point2(to_x - tip_inset, to_y),
       arrow_tip: point2(to_x, to_y),
     };
 
-    if let Some((rect, padding)) = cull_rect {
-      let (min_x, min_y, max_x, max_y) = curve.aabb(padding);
-      if !rect.intersects(min_x, min_y, max_x, max_y) {
-        return None;
-      }
+    if let Some((rect, padding)) = cull_rect
+      && !rect.intersects(curve.aabb(padding))
+    {
+      return None;
     }
 
     Some(curve)
@@ -66,34 +63,18 @@ pub fn iter_edge_curves<'a>(
 }
 
 pub fn hit_test_edge(
-  edges: &[GraphEdge],
-  type_anchors: &HashMap<TypeId, Point2>,
-  collapsed_targets: &HashMap<TypeId, CollapsedTarget>,
-  directed_pairs: &HashSet<(TypeId, TypeId)>,
+  graph: &Graph,
+  layout: &WorkspaceLayout,
   pan: Point2,
   zoom: f32,
   screen_pos: Point2,
 ) -> Option<EdgeId> {
   let threshold = (9.0 * zoom).clamp(7.0, 14.0);
-  let cursor_rect = ViewportRect {
-    min_x: screen_pos.x,
-    min_y: screen_pos.y,
-    max_x: screen_pos.x,
-    max_y: screen_pos.y,
-  };
+  let cursor_rect = Rect::from_point(screen_pos);
   let threshold_sq = threshold * threshold;
 
   let mut best: Option<(EdgeId, f32)> = None;
-  for curve in iter_edge_curves(
-    edges,
-    type_anchors,
-    collapsed_targets,
-    directed_pairs,
-    pan,
-    zoom,
-    point2(0.0, 0.0),
-    Some((cursor_rect, threshold)),
-  ) {
+  for curve in iter_edge_curves(graph, layout, pan, zoom, Some((cursor_rect, threshold))) {
     let dist_sq = min_dist_sq_to_cubic_bezier(
       screen_pos,
       curve.p0,
