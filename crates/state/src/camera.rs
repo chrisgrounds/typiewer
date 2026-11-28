@@ -42,8 +42,34 @@ impl Camera {
     true
   }
 
+  pub fn focus_on(&mut self, world_anchor: Point2, viewport_height: f32) {
+    self.drag_last_pos = None;
+    self.pan.x = DEFAULT_PAN_X - world_anchor.x * self.zoom;
+    self.pan.y = viewport_height * 0.5 - world_anchor.y * self.zoom;
+  }
+
   pub fn reset(&mut self) {
     self.zoom = 1.0;
     self.pan = point2(DEFAULT_PAN_X, DEFAULT_PAN_Y);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn focus_on_centers_world_anchor_vertically_at_default_pan_x() {
+    let mut camera = Camera {
+      pan: point2(10.0, 20.0),
+      zoom: 1.5,
+      drag_last_pos: Some(point2(1.0, 2.0)),
+    };
+
+    camera.focus_on(point2(0.0, 400.0), 800.0);
+
+    assert!(camera.drag_last_pos.is_none());
+    assert!((camera.pan.x - DEFAULT_PAN_X).abs() < 1e-4);
+    assert!((camera.pan.y - (400.0 - 400.0 * 1.5)).abs() < 1e-4);
   }
 }

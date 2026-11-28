@@ -12,6 +12,8 @@ unwrap_used = "deny"
 expect_used = "deny"
 
 [workspace.dependencies]
+command_palette = { path = "crates/command_palette" }
+finder = { path = "crates/finder" }
 gpui = { git = "https://github.com/zed-industries/zed.git" }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", features = ["font-kit"] }
 graph = { path = "crates/graph" }

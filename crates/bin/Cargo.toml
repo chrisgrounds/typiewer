@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+command_palette.workspace = true
+finder.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 graph.workspace = true

@@ -2,10 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use command_palette::{CommandItem, CommandPalette, CommandPaletteEvent, ToggleCommandPalette};
+use finder::{FinderEvent, ToggleFinder, TypeFinder};
 use gpui::{
-  App, Bounds, Context, FocusHandle, KeyBinding, MouseButton, MouseDownEvent, MouseMoveEvent,
-  MouseUpEvent, Pixels, Point, ScrollEvent, Task, TitlebarOptions, Window, WindowBounds,
-  WindowOptions, div, linear_color_stop, linear_gradient, point, prelude::*, px, rgb, size,
+  App, Bounds, Context, Entity, FocusHandle, KeyBinding, MouseButton, MouseDownEvent,
+  MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollEvent, Subscription, Task, TitlebarOptions,
+  Window, WindowBounds, WindowOptions, div, linear_color_stop, linear_gradient, point, prelude::*,
+  px, rgb, size,
 };
 use gpui_platform::application;
 use graph::{FunctionInfo, Graph, GraphEdge, GraphResolution, TypeId, TypeNode};
@@ -15,7 +18,7 @@ use layout::{
   recompute_layout,
 };
 use lsp::LspClient;
-use state::{Camera, InspectorState, LspStatus, Selection};
+use state::{Camera, InspectorState, LspStatus, Selection, ViewerSettings};
 use ui::actions::{ClearSelection, ResetZoom, ZoomIn, ZoomOut};
 use ui::file_card::FileCardEvent;
 use ui::inspector::InspectorEvent;
@@ -67,6 +70,84 @@ impl RenderPerf {
   }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AppCommand {
+  ToggleDotGrid,
+  ToggleEdges,
+  ToggleZoomBadge,
+  OpenTypeFinder,
+  ExpandAll,
+  CollapseAllFiles,
+  CollapseAllCrates,
+  ZoomIn,
+  ZoomOut,
+  ResetZoom,
+  ClearSelection,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum ActiveOverlay {
+  #[default]
+  None,
+  TypeFinder,
+  CommandPalette,
+}
+
+fn on_off(value: bool) -> &'static str {
+  if value { "On" } else { "Off" }
+}
+
+fn build_command_items(settings: ViewerSettings) -> Vec<CommandItem<AppCommand>> {
+  vec![
+    CommandItem::new(AppCommand::ToggleDotGrid, "Settings", "Toggle Dot Grid")
+      .with_detail(on_off(settings.show_dot_grid))
+      .with_keywords("background canvas dots grid"),
+    CommandItem::new(
+      AppCommand::ToggleEdges,
+      "Settings",
+      "Toggle Function Edges",
+    )
+    .with_detail(on_off(settings.show_edges))
+    .with_keywords("arrows lines connections graph"),
+    CommandItem::new(
+      AppCommand::ToggleZoomBadge,
+      "Settings",
+      "Toggle Zoom Indicator",
+    )
+    .with_detail(on_off(settings.show_zoom_badge))
+    .with_keywords("hud badge percentage"),
+    CommandItem::new(AppCommand::OpenTypeFinder, "Navigation", "Go to Type...")
+      .with_detail("⌘P")
+      .with_keywords("find search jump struct enum trait"),
+    CommandItem::new(
+      AppCommand::ExpandAll,
+      "Layout",
+      "Expand All Crates & Files",
+    )
+    .with_keywords("unfold open show"),
+    CommandItem::new(AppCommand::CollapseAllFiles, "Layout", "Collapse All Files")
+      .with_keywords("fold hide"),
+    CommandItem::new(
+      AppCommand::CollapseAllCrates,
+      "Layout",
+      "Collapse All Crates",
+    )
+    .with_keywords("fold hide"),
+    CommandItem::new(AppCommand::ZoomIn, "View", "Zoom In")
+      .with_detail("⌘+")
+      .with_keywords("scale magnify"),
+    CommandItem::new(AppCommand::ZoomOut, "View", "Zoom Out")
+      .with_detail("⌘-")
+      .with_keywords("scale shrink"),
+    CommandItem::new(AppCommand::ResetZoom, "View", "Reset Zoom & Pan")
+      .with_detail("⌘0")
+      .with_keywords("camera center default 100%"),
+    CommandItem::new(AppCommand::ClearSelection, "Selection", "Clear Selection")
+      .with_detail("Esc")
+      .with_keywords("deselect close inspector"),
+  ]
+}
+
 pub struct Application {
   canonical_root: PathBuf,
   crates: Vec<CrateNode>,
@@ -78,6 +159,7 @@ pub struct Application {
   collapsed_targets: HashMap<TypeId, CollapsedTarget>,
   selection: Selection,
   inspector: InspectorState,
+  settings: ViewerSettings,
   top_bar_move_pending: bool,
   lsp_status: LspStatus,
   _lsp_task: Task<()>,
@@ -85,10 +167,20 @@ pub struct Application {
   _perf_log_task: Task<()>,
   camera: Camera,
   focus_handle: FocusHandle,
+  finder: Entity<TypeFinder>,
+  command_palette: Entity<CommandPalette<AppCommand>>,
+  active_overlay: ActiveOverlay,
+  _finder_subscription: Subscription,
+  _command_palette_subscription: Subscription,
 }
 
 impl Application {
-  fn new(workspace_root: PathBuf, graph: Graph, cx: &mut Context<Self>) -> Self {
+  fn new(
+    workspace_root: PathBuf,
+    graph: Graph,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     let canonical_root =
       std::fs::canonicalize(&workspace_root).unwrap_or_else(|_| workspace_root.clone());
     let types_for_lsp = graph.types.clone();
@@ -143,6 +235,12 @@ impl Application {
     });
 
     let directed_pairs = graph.edges.iter().map(|e| (e.from, e.to)).collect();
+    let settings = ViewerSettings::default();
+    let finder = cx.new(|cx| TypeFinder::new(&canonical_root, &all_types, cx));
+    let finder_subscription = cx.subscribe_in(&finder, window, Self::on_finder_event);
+    let command_palette = cx.new(|cx| CommandPalette::new(build_command_items(settings), cx));
+    let command_palette_subscription =
+      cx.subscribe_in(&command_palette, window, Self::on_command_palette_event);
 
     Self {
       canonical_root,
@@ -155,6 +253,7 @@ impl Application {
       collapsed_targets: layout.collapsed_targets,
       selection: Selection::default(),
       inspector: InspectorState::default(),
+      settings,
       top_bar_move_pending: false,
       lsp_status: LspStatus::Initialising,
       _lsp_task: lsp_task,
@@ -162,6 +261,11 @@ impl Application {
       _perf_log_task: perf_log_task,
       camera: Camera::default(),
       focus_handle: cx.focus_handle(),
+      finder,
+      command_palette,
+      active_overlay: ActiveOverlay::None,
+      _finder_subscription: finder_subscription,
+      _command_palette_subscription: command_palette_subscription,
     }
   }
 
@@ -206,6 +310,168 @@ impl Application {
     let ended_drag = self.inspector.end_drag();
     if self.selection.clear() || ended_drag {
       cx.notify();
+    }
+  }
+
+  fn open_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.active_overlay = ActiveOverlay::TypeFinder;
+    self.inspector.end_drag();
+    self.camera.drag_last_pos = None;
+    self
+      .finder
+      .update(cx, |finder, cx| finder.reset(window, cx));
+  }
+
+  fn toggle_finder(&mut self, _: &ToggleFinder, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_overlay == ActiveOverlay::TypeFinder {
+      self.active_overlay = ActiveOverlay::None;
+      window.focus(&self.focus_handle, cx);
+    } else {
+      self.open_finder(window, cx);
+    }
+    cx.notify();
+  }
+
+  fn toggle_command_palette(
+    &mut self,
+    _: &ToggleCommandPalette,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    if self.active_overlay == ActiveOverlay::CommandPalette {
+      self.active_overlay = ActiveOverlay::None;
+      window.focus(&self.focus_handle, cx);
+    } else {
+      self.active_overlay = ActiveOverlay::CommandPalette;
+      self.inspector.end_drag();
+      self.camera.drag_last_pos = None;
+      let items = build_command_items(self.settings);
+      self.command_palette.update(cx, |palette, cx| {
+        palette.set_commands(items, cx);
+        palette.reset(window, cx);
+      });
+    }
+    cx.notify();
+  }
+
+  fn on_finder_event(
+    &mut self,
+    _finder: &Entity<TypeFinder>,
+    event: &FinderEvent,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    match *event {
+      FinderEvent::SelectType(type_id) => {
+        self.active_overlay = ActiveOverlay::None;
+        self.inspector.end_drag();
+        self.ensure_type_expanded(type_id);
+        self.selection.select_type(type_id, &self.edges);
+        if let Some(&anchor) = self.type_anchors.get(&type_id) {
+          let viewport = window.viewport_size();
+          self.camera.focus_on(anchor, f32::from(viewport.height));
+        }
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+      }
+      FinderEvent::Close => {
+        self.active_overlay = ActiveOverlay::None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+      }
+    }
+  }
+
+  fn on_command_palette_event(
+    &mut self,
+    _palette: &Entity<CommandPalette<AppCommand>>,
+    event: &CommandPaletteEvent<AppCommand>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    match *event {
+      CommandPaletteEvent::RunCommand(cmd) => {
+        self.active_overlay = ActiveOverlay::None;
+        window.focus(&self.focus_handle, cx);
+        match cmd {
+          AppCommand::ToggleDotGrid => {
+            self.settings.show_dot_grid = !self.settings.show_dot_grid;
+            cx.notify();
+          }
+          AppCommand::ToggleEdges => {
+            self.settings.show_edges = !self.settings.show_edges;
+            if !self.settings.show_edges {
+              self.selection.hovered_edge = None;
+            }
+            cx.notify();
+          }
+          AppCommand::ToggleZoomBadge => {
+            self.settings.show_zoom_badge = !self.settings.show_zoom_badge;
+            cx.notify();
+          }
+          AppCommand::OpenTypeFinder => {
+            self.open_finder(window, cx);
+            cx.notify();
+          }
+          AppCommand::ExpandAll => {
+            for crate_node in &mut self.crates {
+              crate_node.collapsed = false;
+              for file_node in &mut crate_node.files {
+                file_node.collapsed = false;
+              }
+            }
+            self.relayout();
+            cx.notify();
+          }
+          AppCommand::CollapseAllFiles => {
+            for crate_node in &mut self.crates {
+              for file_node in &mut crate_node.files {
+                file_node.collapsed = true;
+              }
+            }
+            self.relayout();
+            cx.notify();
+          }
+          AppCommand::CollapseAllCrates => {
+            for crate_node in &mut self.crates {
+              crate_node.collapsed = true;
+            }
+            self.relayout();
+            cx.notify();
+          }
+          AppCommand::ZoomIn => self.zoom_in(&ZoomIn, window, cx),
+          AppCommand::ZoomOut => self.zoom_out(&ZoomOut, window, cx),
+          AppCommand::ResetZoom => self.reset_zoom(&ResetZoom, window, cx),
+          AppCommand::ClearSelection => self.clear_selection(&ClearSelection, window, cx),
+        }
+      }
+      CommandPaletteEvent::Close => {
+        self.active_overlay = ActiveOverlay::None;
+        window.focus(&self.focus_handle, cx);
+        cx.notify();
+      }
+    }
+  }
+
+  fn ensure_type_expanded(&mut self, type_id: TypeId) {
+    let mut changed = false;
+    for crate_node in &mut self.crates {
+      for file_node in &mut crate_node.files {
+        if file_node.types.iter().any(|ty| ty.id == type_id) {
+          if crate_node.collapsed {
+            crate_node.collapsed = false;
+            changed = true;
+          }
+          if file_node.collapsed {
+            file_node.collapsed = false;
+            changed = true;
+          }
+          if changed {
+            self.relayout();
+          }
+          return;
+        }
+      }
     }
   }
 
@@ -324,7 +590,8 @@ impl Application {
     window.focus(&self.focus_handle, cx);
     let pos = point2(f32::from(event.position.x), f32::from(event.position.y));
 
-    if event.button == MouseButton::Left
+    if self.settings.show_edges
+      && event.button == MouseButton::Left
       && let Some(edge_id) = hit_test_edge(
         &self.edges,
         &self.type_anchors,
@@ -372,7 +639,7 @@ impl Application {
       self.camera.pan.y += current.y - last.y;
       self.camera.drag_last_pos = Some(current);
       cx.notify();
-    } else {
+    } else if self.settings.show_edges {
       let hovered = hit_test_edge(
         &self.edges,
         &self.type_anchors,
@@ -427,7 +694,10 @@ impl Render for Application {
     let is_dragging = self.camera.is_dragging() || self.inspector.is_dragging();
     let is_hovering_edge = self.selection.hovered_edge.is_some();
 
-    let dot_grid = ui::background::render_dot_grid(self.camera);
+    let dot_grid = self
+      .settings
+      .show_dot_grid
+      .then(|| ui::background::render_dot_grid(self.camera));
     let file_cards = ui::file_card::render_visible_file_cards(
       &self.crates,
       &self.edges,
@@ -437,15 +707,17 @@ impl Render for Application {
       cx,
       Self::on_file_card_event,
     );
-    let edges_layer = ui::edges::render_edges_layer(
-      &self.edges,
-      &self.type_anchors,
-      &self.collapsed_targets,
-      &self.directed_pairs,
-      self.camera,
-      &self.selection,
-      viewport_rect,
-    );
+    let edges_layer = self.settings.show_edges.then(|| {
+      ui::edges::render_edges_layer(
+        &self.edges,
+        &self.type_anchors,
+        &self.collapsed_targets,
+        &self.directed_pairs,
+        self.camera,
+        &self.selection,
+        viewport_rect,
+      )
+    });
     let inspector_panel = ui::inspector::render_inspector_panel(
       &self.canonical_root,
       &self.types,
@@ -458,7 +730,10 @@ impl Render for Application {
       Self::on_inspector_event,
     );
     let lsp_status_badge = ui::hud::render_lsp_status(&self.lsp_status);
-    let zoom_badge = ui::hud::render_zoom_badge(self.camera.zoom);
+    let zoom_badge = self
+      .settings
+      .show_zoom_badge
+      .then(|| ui::hud::render_zoom_badge(self.camera.zoom));
     let top_bar = ui::top_bar::render_top_bar(cx, Self::on_top_bar_event);
 
     let root = div()
@@ -468,6 +743,8 @@ impl Render for Application {
       .on_action(cx.listener(Self::zoom_out))
       .on_action(cx.listener(Self::reset_zoom))
       .on_action(cx.listener(Self::clear_selection))
+      .on_action(cx.listener(Self::toggle_finder))
+      .on_action(cx.listener(Self::toggle_command_palette))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
       .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -487,13 +764,19 @@ impl Render for Application {
         linear_color_stop(rgb(0x040406), 1.0),
       ))
       .text_color(rgb(0xf4f6fb))
-      .child(dot_grid)
+      .when_some(dot_grid, |el, grid| el.child(grid))
       .children(file_cards)
-      .child(edges_layer)
+      .when_some(edges_layer, |el, edges| el.child(edges))
       .when_some(inspector_panel, |el, panel| el.child(panel))
       .when_some(lsp_status_badge, |el, badge| el.child(badge))
-      .child(zoom_badge)
-      .child(top_bar);
+      .when_some(zoom_badge, |el, badge| el.child(badge))
+      .child(top_bar)
+      .when(self.active_overlay == ActiveOverlay::TypeFinder, |el| {
+        el.child(self.finder.clone())
+      })
+      .when(self.active_overlay == ActiveOverlay::CommandPalette, |el| {
+        el.child(self.command_palette.clone())
+      });
 
     self.render_perf.record(render_start.elapsed());
     root
@@ -509,6 +792,8 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
       KeyBinding::new("cmd-0", ResetZoom, None),
       KeyBinding::new("escape", ClearSelection, None),
     ]);
+    finder::bind_keys(cx);
+    command_palette::bind_keys(cx);
 
     cx.on_window_closed(|cx, _window_id| {
       if cx.windows().is_empty() {
@@ -532,7 +817,7 @@ pub fn run(workspace_root: PathBuf, graph: Graph) {
         ..Default::default()
       },
       |window, cx| {
-        let view = cx.new(|cx| Application::new(workspace_root, graph, cx));
+        let view = cx.new(|cx| Application::new(workspace_root, graph, window, cx));
         let focus = view.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         view
